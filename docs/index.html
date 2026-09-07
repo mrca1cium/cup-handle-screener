@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>美股杯柄形態篩選器 | Cup & Handle Screener</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  body { font-family: -apple-system, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif; }
+  .grade-match { background:#dcfce7; color:#166534; }
+  .grade-watch { background:#fef9c3; color:#854d0e; }
+  details > summary { list-style:none; cursor:pointer; }
+  details > summary::-webkit-details-marker { display:none; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+<div class="max-w-6xl mx-auto p-4">
+
+<header class="mb-6">
+  <h1 class="text-2xl font-bold">🍵 美股杯柄形態篩選器</h1>
+  <p class="text-sm text-slate-500">Stage 2 趨勢篩選 + 杯柄 / VCP / 量縮偵測（Minervini 系統）·
+    資料來源：Yahoo Finance · 更新日期：<span id="gen-date">—</span> · 已掃描 <span id="total">—</span> 隻</p>
+</header>
+
+<!-- Step 1 大市狀態 -->
+<section id="market" class="bg-white rounded-xl shadow p-4 mb-6">
+  <h2 class="font-semibold mb-3">📈 大市狀態（Step 1 照鏡）</h2>
+  <div id="indices" class="flex flex-wrap gap-3 mb-4"></div>
+  <h3 class="text-sm font-semibold text-slate-600 mb-2">板塊相對強弱（近 1 個月 vs S&P 500）</h3>
+  <div id="sectors" class="space-y-1"></div>
+</section>
+
+<!-- 操作列 -->
+<section class="flex items-center gap-3 mb-3">
+  <button id="copy-btn" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">📋 複製全部代號（貼 TradingView 設 Alert）</button>
+  <label class="text-sm"><input type="checkbox" id="show-watch" class="mr-1">顯示觀察名單</label>
+  <span id="copy-msg" class="text-green-600 text-sm hidden">已複製！</span>
+</section>
+
+<!-- 主表 -->
+<section id="table-wrap" class="space-y-3"></section>
+
+<footer class="text-xs text-slate-400 mt-8 pb-8">
+  本工具只提供形態篩選參考，唔構成投資建議。突破買入前請按手冊 Step 3 肉眼審查形態美觀度，並嚴守 8% 硬止蝕。
+</footer>
+</div>
+
+<script>
+const CHECK_LABELS = {
+  "1_price_above_150_200": "① 股價 > 150/200MA",
+  "2_ma150_above_200": "② 150MA > 200MA",
+  "3_ma200_rising": "③ 200MA 向上",
+  "4_ma50_above_150_200": "④ 50MA > 150/200MA",
+  "5_price_above_50": "⑤ 股價 > 50MA",
+  "6_within_25pct_of_52w_high": "⑥ 距52週高 ≤25%",
+  "7_at_least_25pct_above_52w_low": "⑦ 高於52週低 ≥25%",
+  "8_rs_above_70": "⑧ RS評級 ≥70",
+  "cup_depth_ok": "杯深度 12–40%",
+  "cup_length_ok": "杯長 1–6個月",
+  "handle_length_ok": "柄長 1週–2個月",
+  "handle_shorter_than_cup": "柄短於杯身",
+  "handle_near_rim": "柄部貼近杯口",
+  "vcp_range_le_10": "VCP 波幅 ≤10%",
+  "higher_lows": "一底高過一底",
+  "no_lower_lows": "無一底低過一底",
+  "volume_dry_up": "量縮 VDU",
+  "not_too_sharp": "非急拉突破",
+};
+const PAT_KEYS = ["cup_depth_ok","cup_length_ok","handle_length_ok","handle_shorter_than_cup","handle_near_rim","vcp_range_le_10","higher_lows","no_lower_lows","volume_dry_up","not_too_sharp"];
+
+let results, charts;
+
+async function init() {
+  [results, charts] = await Promise.all([
+    fetch('data/results.json').then(r => r.json()),
+    fetch('data/charts.json').then(r => r.json()),
+  ]);
+  document.getElementById('gen-date').textContent = results.generated_at || '—';
+  document.getElementById('total').textContent = results.total_scanned;
+  renderMarket(results.market);
+  if (!(results.results||[]).length) document.getElementById('show-watch').checked = true;
+  renderTable();
+  document.getElementById('show-watch').addEventListener('change', renderTable);
+  document.getElementById('copy-btn').addEventListener('click', copyAll);
+}
+
+function renderMarket(m) {
+  if (!m || !m.indices) return;
+  const idx = document.getElementById('indices');
+  idx.innerHTML = Object.values(m.indices).map(i => `
+    <div class="rounded-lg px-3 py-2 text-sm ${i.correction ? 'bg-amber-100 text-amber-800' : i.pullback ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-50 text-slate-600'}">
+      <b>${i.name}</b> 回調 ${i.drawdown_pct}%
+      ${i.correction ? '· 🔍 開啟雷達' : ''}
+    </div>`).join('');
+  const maxAbs = Math.max(...(m.sectors||[]).map(s => Math.abs(s.rel_vs_spy)), 1);
+  document.getElementById('sectors').innerHTML = (m.sectors||[]).map(s => {
+    const w = Math.abs(s.rel_vs_spy) / maxAbs * 45;
+    const right = s.rel_vs_spy < 0;
+    return `<div class="flex items-center gap-2 text-xs">
+      <span class="w-28 text-right">${right ? s.name : ''}</span>
+      <div class="flex-1 relative h-4 bg-slate-50 rounded">
+        <div class="absolute top-0 bottom-0 ${right ? 'bg-red-400' : 'bg-emerald-500'} rounded"
+             style="${right ? 'right:50%' : 'left:50%'}; width:${w}%"></div>
+        <div class="absolute top-0 bottom-0 w-px bg-slate-300" style="left:50%"></div>
+      </div>
+      <span class="w-28">${right ? '' : s.name}</span>
+      <span class="w-16 ${right ? 'text-red-500' : 'text-emerald-600'}">${s.rel_vs_spy > 0 ? '+' : ''}${s.rel_vs_spy}%</span>
+    </div>`;
+  }).join('');
+}
+
+function renderTable() {
+  const showWatch = document.getElementById('show-watch').checked;
+  const list = [...(results.results||[])];
+  if (showWatch) list.push(...(results.watchlist||[]));
+  const wrap = document.getElementById('table-wrap');
+  if (!list.length) {
+    wrap.innerHTML = '<div class="bg-white rounded-xl shadow p-8 text-center text-slate-500">今日無符合杯柄條件嘅股票。大市回調時再嚟睇 👀</div>';
+    return;
+  }
+  wrap.innerHTML = list.map(card).join('');
+  list.forEach(e => { if (charts[e.symbol]) drawChart(e); });
+}
+
+function card(e) {
+  const m = e.metrics, v = e.stage2.values;
+  return `<details class="bg-white rounded-xl shadow overflow-hidden">
+    <summary class="p-4 flex flex-wrap items-center gap-3 hover:bg-slate-50">
+      <span class="px-2 py-0.5 rounded text-xs font-semibold grade-${e.grade}">${e.grade === 'match' ? '完整杯柄' : '觀察'}</span>
+      <span class="font-bold text-lg">${e.symbol}</span>
+      <span class="text-sm text-slate-500">${e.name}${e.sector ? ' · ' + e.sector : ''}</span>
+      <span class="ml-auto flex gap-4 text-sm text-center">
+        <span>現價<br><b>${m.close}</b></span>
+        <span>杯深度<br><b>${m.cup_depth_pct}%</b></span>
+        <span>VCP波幅<br><b>${m.vcp_range_pct}%</b></span>
+        <span>量縮比<br><b>${m.vdu_ratio ?? '—'}</b></span>
+        <span class="text-blue-700">Pivot<br><b>${m.pivot}</b></span>
+        <span>距Pivot<br><b>${m.pct_to_pivot > 0 ? '+' : ''}${m.pct_to_pivot}%</b></span>
+        <span>RS評級<br><b>${v.rs_rating}</b></span>
+      </span>
+    </summary>
+    <div class="border-t px-4 py-3 grid md:grid-cols-3 gap-4">
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 mb-2">STAGE 2 八大條件</h4>
+        ${checklist(e.stage2.checks)}
+      </div>
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 mb-2">杯柄形態檢查</h4>
+        ${checklist(e.checks)}
+        <div class="text-xs text-slate-500 mt-2 leading-5">
+          杯口 ${m.rim_price}（${m.rim_date}）→ 杯底 ${m.bottom_price}（${m.bottom_date}，${m.cup_days} 日）<br>
+          柄部 ${m.handle_days} 日 · 高 ${m.handle_high} / 低 ${m.handle_low}<br>
+          🛑 建議止蝕 <b class="text-red-600">${m.stop_loss}</b> · 🎯 1R 目標 ${m.target_1r}
+        </div>
+      </div>
+      <div>
+        <div id="chart-${e.symbol}" class="h-56"></div>
+      </div>
+    </div>
+  </details>`;
+}
+
+function checklist(checks) {
+  return '<ul class="text-xs space-y-0.5">' + Object.entries(checks).map(([k, ok]) =>
+    `<li class="${ok ? 'text-slate-600' : 'text-red-500'}">${ok ? '✅' : '❌'} ${CHECK_LABELS[k] || k}</li>`
+  ).join('') + '</ul>';
+}
+
+function drawChart(e) {
+  const el = document.getElementById('chart-' + e.symbol);
+  if (!el) return;
+  const d = charts[e.symbol];
+  const chart = LightweightCharts.createChart(el, {
+    height: 224, layout: { background: { color: '#fff' } }, grid: {
+      vertLines: { color: '#f1f5f9' }, horzLines: { color: '#f1f5f9' } },
+    timeScale: { timeVisible: false, borderVisible: false },
+  });
+  const series = chart.addCandlestickSeries({
+    upColor: '#10b981', downColor: '#ef4444', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#ef4444',
+  });
+  series.setData(d.dates.map((t, i) => ({ time: t, open: d.open[i], high: d.high[i], low: d.low[i], close: d.close[i] })));
+  series.createPriceLine({ price: e.metrics.pivot, color: '#2563eb', lineWidth: 1, lineStyle: 2,
+    axisLabelVisible: true, title: 'Pivot ' + e.metrics.pivot });
+  // 標示杯底
+  const bi = d.dates.indexOf(e.metrics.bottom_date);
+  if (bi >= 0) series.setMarkers([{ position: 'belowBar', color: '#f59e0b', shape: 'circle', time: d.dates[bi] }]);
+  chart.timeScale().fitContent();
+}
+
+function copyAll() {
+  const syms = (results.results||[]).map(e => e.symbol).join(', ');
+  navigator.clipboard.writeText(syms).then(() => {
+    const msg = document.getElementById('copy-msg');
+    msg.classList.remove('hidden');
+    setTimeout(() => msg.classList.add('hidden'), 2000);
+  });
+}
+
+init();
+</script>
+</body>
+</html>

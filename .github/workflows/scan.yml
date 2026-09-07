@@ -1,0 +1,28 @@
+name: Daily Cup & Handle Scan
+
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"  # 美東收市後 30 分鐘（UTC 21:30，香港朝早 5:30，夏令）；冬日時間請改 22:30
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run screener
+        run: python screener/main.py --pause 0.35
+      - name: Commit results
+        run: |
+          git config user.name "screener-bot"
+          git config user.email "actions@github.com"
+          git add docs/data/
+          git diff --cached --quiet || git commit -m "scan: $(date -u +%F) results"
+          git push
