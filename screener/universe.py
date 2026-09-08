@@ -1,5 +1,13 @@
 from __future__ import annotations
-"""S&P 500 成分股清單（從 Wikipedia 取得，失敗時用內建後備名單）。"""
+"""股票池清單（從 Wikipedia 取得，失敗時用內建後備名單）。
+
+支援兩個池：
+  • sp500  —— 原本嘅 S&P 500（約 500 隻）
+  • sp1500 —— S&P 500 + S&P 400 (MidCap) + S&P 600 (SmallCap)，約 1,400–1,500 隻，
+              市值下限大約對應 Mid/Large Cap（S&P 600 最細嗰批市值都有幾億美元），
+              比起漫無目的咁掃全市場 8,000+ 隻，會篩走大量低流動性垃圾股，
+              亦避免因為請求量過大而畀 Yahoo Finance 封鎖 GitHub Actions 嘅雲端 IP。
+"""
 import json
 import logging
 
@@ -7,7 +15,11 @@ import requests
 
 log = logging.getLogger(__name__)
 
-WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+WIKI_URLS = {
+    "sp500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+    "sp400": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+    "sp600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+}
 
 # 後備名單：Wikipedia 失敗時用（高流動性大型股 60 隻）
 FALLBACK = [
@@ -21,9 +33,9 @@ FALLBACK = [
 
 
 def get_sp500() -> list[dict]:
-    """回傳 [{"symbol", "name", "sector"}]。"""
+    """回傳 [{"symbol", "name", "sector"}]（原本嘅 S&P 500，向下兼容）。"""
     try:
-        tables = pd_read_wiki()
+        tables = _read_wiki_table(WIKI_URLS["sp500"])
         if tables:
             log.info("Wikipedia 取得 %d 隻 S&P 500 成分股", len(tables))
             return tables
@@ -32,10 +44,37 @@ def get_sp500() -> list[dict]:
     return [{"symbol": s, "name": s, "sector": ""} for s in FALLBACK]
 
 
-def pd_read_wiki() -> list[dict]:
+def get_sp1500() -> list[dict]:
+    """回傳 S&P 500 + 400 + 600 合併名單（去重，同一代號以先出現嗰個為準）。"""
+    merged: dict[str, dict] = {}
+    total_ok = 0
+    for key in ("sp500", "sp400", "sp600"):
+        try:
+            rows = _read_wiki_table(WIKI_URLS[key])
+            for r in rows:
+                merged.setdefault(r["symbol"], r)
+            total_ok += 1
+            log.info("Wikipedia %s 取得 %d 隻", key, len(rows))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Wikipedia %s 抓取失敗（%s），跳過呢個池", key, e)
+    if not merged:
+        log.warning("三個 Wikipedia 池全部抓取失敗，改用內建後備名單")
+        return [{"symbol": s, "name": s, "sector": ""} for s in FALLBACK]
+    log.info("S&P 1500 合併池共 %d 隻（去重後）", len(merged))
+    return list(merged.values())
+
+
+def get_universe(mode: str = "sp1500") -> list[dict]:
+    """統一入口：mode = 'sp500' 或 'sp1500'。"""
+    if mode == "sp500":
+        return get_sp500()
+    return get_sp1500()
+
+
+def _read_wiki_table(url: str) -> list[dict]:
     import pandas as pd
 
-    resp = requests.get(WIKI_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     dfs = pd.read_html(resp.text)
     df = dfs[0]
@@ -44,11 +83,15 @@ def pd_read_wiki() -> list[dict]:
         sym = str(r["Symbol"]).strip().replace(".", "-")  # BRK.B -> BRK-B (yahoo 格式)
         out.append({
             "symbol": sym,
-            "name": str(r.get("Security", sym)),
+            "name": str(r.get("Security", r.get("Company", sym))),
             "sector": str(r.get("GICS Sector", "")),
         })
     return out
 
 
+# 向下兼容舊名（有其他腳本可能仲引用緊呢個名）
+pd_read_wiki = lambda: _read_wiki_table(WIKI_URLS["sp500"])  # noqa: E731
+
+
 if __name__ == "__main__":
-    print(json.dumps(get_sp500()[:5], ensure_ascii=False, indent=2))
+    print(json.dumps(get_universe("sp1500")[:5], ensure_ascii=False, indent=2))
