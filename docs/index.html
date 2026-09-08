@@ -29,6 +29,7 @@
   <div id="indices" class="flex flex-wrap gap-3 mb-4"></div>
   <h3 class="text-sm font-semibold text-slate-600 mb-2">板塊相對強弱（近 1 個月 vs S&P 500）</h3>
   <div id="sectors" class="space-y-1"></div>
+  <p class="text-xs text-slate-400 mt-3">下面名單已經按呢個板塊強弱加分：🔥 強勢板塊排前，弱勢板塊照顯示但排後（唔會剔除）——強股都可以嚟自中性或冇對應 GICS 嘅主題板塊（例如 GLD／XME）。</p>
 </section>
 
 <!-- 操作列 -->
@@ -123,6 +124,18 @@ function renderTable() {
   list.forEach(e => { if (charts[e.symbol]) drawChart(e); });
 }
 
+function sectorBadge(e) {
+  const st = e.sector_strength;
+  if (!st) return '';
+  if (st.tier === 'strong') {
+    return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold bg-orange-100 text-orange-700" title="板塊強勢：${st.etf || ''} 近1個月跑贏大市 ${st.rel_vs_spy > 0 ? '+' : ''}${st.rel_vs_spy}%">🔥 板塊強勢</span>`;
+  }
+  if (st.tier === 'weak') {
+    return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-500" title="板塊偏弱：${st.etf || ''} 近1個月落後大市 ${st.rel_vs_spy}%">板塊偏弱</span>`;
+  }
+  return '';
+}
+
 function card(e) {
   const m = e.metrics, v = e.stage2.values;
   return `<details class="bg-white rounded-xl shadow overflow-hidden">
@@ -130,6 +143,7 @@ function card(e) {
       <span class="px-2 py-0.5 rounded text-xs font-semibold grade-${e.grade}">${e.grade === 'match' ? '完整杯柄' : '觀察'}</span>
       <span class="font-bold text-lg">${e.symbol}</span>
       <span class="text-sm text-slate-500">${e.name}${e.sector ? ' · ' + e.sector : ''}</span>
+      ${sectorBadge(e)}
       <span class="ml-auto flex gap-4 text-sm text-center">
         <span>現價<br><b>${m.close}</b></span>
         <span>杯深度<br><b>${m.cup_depth_pct}%</b></span>
