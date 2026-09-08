@@ -14,9 +14,13 @@ HEADERS = {
     "Accept": "application/json",
 }
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 
 # 失敗重試次數
 RETRIES = 3
+
+# 流動性初篩：每次 batch 幾多隻代號（URL 長度同 Yahoo 單次回應量嘅折衷）
+QUOTE_BATCH_SIZE = 50
 
 
 def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = None) -> Optional[dict]:
@@ -68,6 +72,64 @@ def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = None) -> Option
 def d2s(ts: int) -> str:
     import datetime
     return datetime.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
+    """批量攞現價 + 3 個月日均成交量（v7/finance/quote 一次可以問幾十隻），
+    用嚟喺落全歷史 K 線之前，平價咁剔除低價/低量嘅垃圾股（見 prefilter_liquidity）。
+    單一 batch 失敗只影響嗰 batch（fail-open：main.py 會保留冇報價嘅代號，唔會因為
+    呢一步 API 唔穩定而漏篩好股）。"""
+    out: dict[str, dict] = {}
+    for i in range(0, len(symbols), QUOTE_BATCH_SIZE):
+        batch = symbols[i:i + QUOTE_BATCH_SIZE]
+        for attempt in range(RETRIES):
+            try:
+                r = requests.get(QUOTE_URL, params={"symbols": ",".join(batch)},
+                                  headers=HEADERS, timeout=30)
+                if r.status_code == 429:
+                    wait = 20 * (attempt + 1)
+                    log.warning("quote batch 被限流，等 %ds 重試", wait)
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                results = r.json().get("quoteResponse", {}).get("result", [])
+                for q in results:
+                    sym = q.get("symbol")
+                    if not sym:
+                        continue
+                    out[sym] = {
+                        "price": q.get("regularMarketPrice"),
+                        "avg_vol": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day"),
+                    }
+                break
+            except Exception as e:  # noqa: BLE001
+                log.warning("quote batch 第 %d 次失敗: %s", attempt + 1, e)
+                time.sleep(5 * (attempt + 1))
+        time.sleep(pause)
+    return out
+
+
+def prefilter_liquidity(symbols: list[str], min_price: float = 10.0,
+                         min_avg_vol: int = 500_000) -> list[str]:
+    """用批量報價剔除股價 < min_price 或 3 個月日均成交量 < min_avg_vol 嘅代號。
+    冇報價（batch 失敗/代號有問題）嘅一律保留（fail-open），交由後面完整嘅
+    Stage 2 流動性檢查（同一門檻）把關，寧願多落一次歷史數據，都唔好誤刪好股。"""
+    quotes = fetch_quotes(symbols)
+    kept = []
+    dropped = 0
+    for s in symbols:
+        q = quotes.get(s)
+        if not q or q.get("price") is None or q.get("avg_vol") is None:
+            kept.append(s)
+            continue
+        if q["price"] >= min_price and q["avg_vol"] >= min_avg_vol:
+            kept.append(s)
+        else:
+            dropped += 1
+    log.info("流動性初篩：%d → %d 隻（剔除 %d 隻低價/低量股，-%.0f%%）",
+              len(symbols), len(kept), dropped,
+              (dropped / len(symbols) * 100) if symbols else 0)
+    return kept
 
 
 def fetch_many(symbols: list[str], pause: float = 0.35, range_: str = "2y") -> dict[str, dict]:
