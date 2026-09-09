@@ -15,6 +15,7 @@ import csv
 import io
 import json
 import logging
+import re
 
 import requests
 
@@ -27,6 +28,13 @@ WIKI_URLS = {
     "sp400": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
     "sp600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
 }
+
+# SEC 官方代號表——同 Wikipedia 冇關係，唔會撞正 Wikipedia 嗰個雲端 IP 封鎖。
+# 冇 GICS 板塊、冇市值，但覆蓋成個美股市場（~10,000 隻），做「長尾」候選池嘅來源，
+# 靠 data.prefilter_liquidity() 嘅市值/流動性初篩把關（唔會不經篩選就落佢哋歷史數據）。
+SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+SEC_HEADERS = {"User-Agent": "cup-handle-screener research (github.com/mrca1cium/cup-handle-screener)"}
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
 
 # 後備名單：CSV 同 Wikipedia 都失敗先用（高流動性大型股 60 隻）
 FALLBACK = [
@@ -81,10 +89,46 @@ def get_sp1500() -> list[dict]:
 
 
 def get_universe(mode: str = "sp1500") -> list[dict]:
-    """統一入口：mode = 'sp500' 或 'sp1500'。"""
+    """統一入口：mode = 'sp500' / 'sp1500' / 'broad'（sp1500 + SEC 長尾，向下兼容用；
+    正式流程請用 get_broad_market()，可以分開核心池同長尾嚴格把關）。"""
     if mode == "sp500":
         return get_sp500()
-    return get_sp1500()
+    if mode == "sp1500":
+        return get_sp1500()
+    core, extra = get_broad_market()
+    return core + extra
+
+
+def _read_sec_tickers() -> list[dict]:
+    resp = requests.get(SEC_TICKERS_URL, timeout=30, headers=SEC_HEADERS)
+    resp.raise_for_status()
+    data = resp.json()
+    out = []
+    for row in data.values():
+        sym = str(row.get("ticker", "")).strip().upper()
+        if not sym or not _TICKER_RE.match(sym):
+            continue  # 濾走明顯唔係普通股代號嘅雜訊（基金份額、奇怪代號等）
+        out.append({"symbol": sym, "name": str(row.get("title", sym)), "sector": ""})
+    return out
+
+
+def get_broad_market() -> tuple[list[dict], list[dict]]:
+    """回傳 (core, extra)：
+      • core  —— S&P 1500（有 GICS 板塊資料，如果 Wikipedia 畀擋就淨係 S&P 500）
+      • extra —— SEC 全市場代號表當中扣走 core 已有嗰啲之後嘅長尾（冇板塊資料，
+                  冇市值資料，靠 main.py 用 data.prefilter_liquidity(min_market_cap=...,
+                  fail_open=False) 嚴格篩走冇報價/細市值/低流動性嗰批，先至會落歷史數據）。
+    """
+    core = get_sp1500()
+    seen = {r["symbol"] for r in core}
+    try:
+        sec_rows = _read_sec_tickers()
+        log.info("SEC company_tickers.json 取得 %d 隻候選代號", len(sec_rows))
+    except Exception as e:  # noqa: BLE001
+        log.warning("SEC 代號表抓取失敗（%s），今次冇長尾，淨係得 sp1500 核心池", e)
+        sec_rows = []
+    extra = [r for r in sec_rows if r["symbol"] not in seen]
+    return core, extra
 
 
 def _read_sp500_csv() -> list[dict]:
