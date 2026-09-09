@@ -20,10 +20,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas lxml
       - name: Run screener
-        # --universe sp1500：S&P500+400+600（約1400-1500隻）取代舊時得500隻
-        # 落歷史K線前，會先用批量報價（v7/quote）剔除股價<$10或日均量<50萬嘅垃圾股，
-        # 大減要落嘅歷史請求數量，避免畀 Yahoo Finance 限流／封鎖 GitHub Actions IP
-        run: python screener/main.py --pause 0.35 --universe sp1500
+        # --universe broad：sp1500（有 GICS 板塊）+ SEC 全市場長尾（冇板塊，但用
+        # --min-market-cap 同 --min-avg-vol 嚴格把關，唔會落未經驗證嘅細價股歷史數據）
+        # --max-universe 1500：篩後最終落歷史 K 線嘅隻數上限，核心池優先保留
+        run: python screener/main.py --pause 0.35 --universe broad --min-market-cap 2000000000 --max-universe 1500
       - name: Commit results
         run: |
           git config user.name "screener-bot"
