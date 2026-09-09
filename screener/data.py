@@ -75,10 +75,10 @@ def d2s(ts: int) -> str:
 
 
 def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
-    """批量攞現價 + 3 個月日均成交量（v7/finance/quote 一次可以問幾十隻），
-    用嚟喺落全歷史 K 線之前，平價咁剔除低價/低量嘅垃圾股（見 prefilter_liquidity）。
-    單一 batch 失敗只影響嗰 batch（fail-open：main.py 會保留冇報價嘅代號，唔會因為
-    呢一步 API 唔穩定而漏篩好股）。"""
+    """批量攞現價 + 3 個月日均成交量 + 市值（v7/finance/quote 一次可以問幾十隻），
+    用嚟喺落全歷史 K 線之前，平價咁剔除低價/低量/細市值嘅垃圾股（見 prefilter_liquidity）。
+    單一 batch 失敗只影響嗰 batch，唔會累街坊（會唔會 fail-open 由 prefilter_liquidity
+    嗰邊嘅 fail_open 參數決定，呢個 function 淨係負責攞數）。"""
     out: dict[str, dict] = {}
     for i in range(0, len(symbols), QUOTE_BATCH_SIZE):
         batch = symbols[i:i + QUOTE_BATCH_SIZE]
@@ -100,6 +100,7 @@ def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
                     out[sym] = {
                         "price": q.get("regularMarketPrice"),
                         "avg_vol": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day"),
+                        "market_cap": q.get("marketCap"),
                     }
                 break
             except Exception as e:  # noqa: BLE001
@@ -110,23 +111,39 @@ def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
 
 
 def prefilter_liquidity(symbols: list[str], min_price: float = 10.0,
-                         min_avg_vol: int = 500_000) -> list[str]:
-    """用批量報價剔除股價 < min_price 或 3 個月日均成交量 < min_avg_vol 嘅代號。
-    冇報價（batch 失敗/代號有問題）嘅一律保留（fail-open），交由後面完整嘅
-    Stage 2 流動性檢查（同一門檻）把關，寧願多落一次歷史數據，都唔好誤刪好股。"""
+                         min_avg_vol: int = 500_000, min_market_cap: int = 0,
+                         fail_open: bool = True) -> list[str]:
+    """用批量報價剔除股價 < min_price、3 個月日均成交量 < min_avg_vol，
+    或者（當 min_market_cap > 0 時）市值 < min_market_cap 嘅代號。
+
+    fail_open=True（用於已知嘅核心池，例如 S&P 1500）：冇報價（batch 失敗/代號有問題）
+    嘅一律保留，交由後面完整嘅 Stage 2 流動性檢查把關，寧願多落一次歷史數據都唔好誤刪好股。
+
+    fail_open=False（用於冇 GICS 板塊資料嘅 SEC 全市場長尾）：冇報價嘅一律剔除——
+    呢批代號本身就冇經過指數篩選，唯一把關嘅就係呢個市值/流動性初篩，如果攞唔到
+    報價就冇辦法確認佢係唔係垂青嘅 mid/large cap，寧願唔落佢歷史數據，
+    好過落成千上萬隻冇經過驗證嘅細價/垂死股，浪費時間又可能拖冇個 workflow。"""
     quotes = fetch_quotes(symbols)
     kept = []
     dropped = 0
     for s in symbols:
         q = quotes.get(s)
-        if not q or q.get("price") is None or q.get("avg_vol") is None:
-            kept.append(s)
+        missing_cap = min_market_cap and q and q.get("market_cap") is None
+        if not q or q.get("price") is None or q.get("avg_vol") is None or missing_cap:
+            if fail_open:
+                kept.append(s)
+            else:
+                dropped += 1
             continue
-        if q["price"] >= min_price and q["avg_vol"] >= min_avg_vol:
+        ok = q["price"] >= min_price and q["avg_vol"] >= min_avg_vol
+        if min_market_cap:
+            ok = ok and (q.get("market_cap") or 0) >= min_market_cap
+        if ok:
             kept.append(s)
         else:
             dropped += 1
-    log.info("流動性初篩：%d → %d 隻（剔除 %d 隻低價/低量股，-%.0f%%）",
+    log.info("流動性初篩（fail_open=%s%s）：%d → %d 隻（剔除 %d 隻，-%.0f%%）",
+              fail_open, f", min_cap=${min_market_cap:,}" if min_market_cap else "",
               len(symbols), len(kept), dropped,
               (dropped / len(symbols) * 100) if symbols else 0)
     return kept
