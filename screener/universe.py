@@ -1,27 +1,43 @@
 from __future__ import annotations
-"""股票池清單。
+"""股票池來源。
 
-Wikipedia 而家會擋 GitHub Actions（同好多雲端）嘅 IP，直接爬佢個表已經唔穩陣——
-所以 S&P 500 改用一個持續同步 Wikipedia 內容嘅 GitHub 靜態 CSV（`datasets/s-and-p-500-companies`）
-做主要來源，靠 raw.githubusercontent.com（GitHub Actions 本身可以連）而唔係 en.wikipedia.org。
-Wikipedia 直接爬仍然keep 做 S&P 400/600 嘅來源（暫時冇同類穩陣嘅 CSV 可用）同埋 S&P 500 嘅後備。
+架構：
+  1. S&P 500：GitHub static CSV 為主要來源。
+  2. S&P 400 / 600：iShares IJH / IJR holdings CSV 為主要來源，Wikipedia 只作後備。
+  3. SEC company_tickers.json：提供 S&P 1500 以外嘅長尾候選股。
 
-支援兩個池：
-  • sp500  —— 約 500 隻
-  • sp1500 —— S&P 500（CSV，穩陣） + S&P 400/600（Wikipedia，如果畀擋咗就淨係得 500 隻，
-              唔會整個池跌落去得 60 隻嗰個內建後備）
+重要：呢個 module 只負責「候選股票池」，唔做市值/成交量篩選；
+data.py 會用 Yahoo quote 做廉價 pre-filter，避免對幾千隻股票逐隻下載 2y 日線。
 """
+
 import csv
 import io
 import json
 import logging
 import re
+from pathlib import Path
 
 import requests
 
 log = logging.getLogger(__name__)
 
-SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+SP500_CSV_URL = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/"
+    "main/data/constituents.csv"
+)
+
+# iShares ETF holdings：IJH ≈ S&P MidCap 400；IJR ≈ S&P SmallCap 600。
+# 比直接爬 Wikipedia 穩定，而且係由指數 ETF 嘅 holdings 提供 constituent candidates。
+ISHARES_URLS = {
+    "sp400": (
+        "https://www.ishares.com/us/products/239763/ishares-core-sp-midcap-etf/"
+        "1467271812596.ajax?fileType=csv&fileName=IJH_holdings&dataType=fund"
+    ),
+    "sp600": (
+        "https://www.ishares.com/us/products/239774/ishares-core-sp-small-cap-etf/"
+        "1467271812596.ajax?fileType=csv&fileName=IJR_holdings&dataType=fund"
+    ),
+}
 
 WIKI_URLS = {
     "sp500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
@@ -29,14 +45,14 @@ WIKI_URLS = {
     "sp600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
 }
 
-# SEC 官方代號表——同 Wikipedia 冇關係，唔會撞正 Wikipedia 嗰個雲端 IP 封鎖。
-# 冇 GICS 板塊、冇市值，但覆蓋成個美股市場（~10,000 隻），做「長尾」候選池嘅來源，
-# 靠 data.prefilter_liquidity() 嘅市值/流動性初篩把關（唔會不經篩選就落佢哋歷史數據）。
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_HEADERS = {"User-Agent": "cup-handle-screener research (github.com/mrca1cium/cup-handle-screener)"}
+SEC_HEADERS = {
+    "User-Agent": "cup-handle-screener research (github.com/mrca1cium/cup-handle-screener)"
+}
+
+# Yahoo 常見普通股格式；過長/特殊代號先唔入 broad candidate pool。
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
 
-# 後備名單：CSV 同 Wikipedia 都失敗先用（高流動性大型股 60 隻）
 FALLBACK = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "BRK-B", "TSLA", "LLY",
     "AVGO", "JPM", "V", "UNH", "XOM", "MA", "COST", "HD", "PG", "JNJ",
@@ -47,56 +63,200 @@ FALLBACK = [
 ]
 
 
+def _normalise_symbol(symbol: str) -> str:
+    """轉成 Yahoo 常用 ticker 格式，例如 BRK.B -> BRK-B。"""
+    return str(symbol or "").strip().upper().replace(".", "-")
+
+
+def _valid_symbol(symbol: str) -> bool:
+    return bool(_TICKER_RE.match(symbol))
+
+
+def _dedupe(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for row in rows:
+        sym = _normalise_symbol(row.get("symbol", ""))
+        if not _valid_symbol(sym) or sym in seen:
+            continue
+        seen.add(sym)
+        out.append({
+            "symbol": sym,
+            "name": str(row.get("name") or sym),
+            "sector": str(row.get("sector") or ""),
+        })
+    return out
+
+
 def get_sp500() -> list[dict]:
-    """回傳 [{"symbol", "name", "sector"}]。順序試：GitHub CSV → Wikipedia → 內建後備。"""
+    """回傳 S&P 500；來源失敗時依次用 Wikipedia，再用內建後備。"""
     try:
         rows = _read_sp500_csv()
         if rows:
             log.info("GitHub CSV 取得 %d 隻 S&P 500 成分股", len(rows))
             return rows
     except Exception as e:  # noqa: BLE001
-        log.warning("GitHub CSV 抓取失敗（%s），試 Wikipedia", e)
+        log.warning("S&P 500 GitHub CSV 失敗：%s", e)
+
     try:
         rows = _read_wiki_table(WIKI_URLS["sp500"])
         if rows:
             log.info("Wikipedia 取得 %d 隻 S&P 500 成分股", len(rows))
             return rows
     except Exception as e:  # noqa: BLE001
-        log.warning("Wikipedia 抓取失敗（%s），改用內建後備名單", e)
+        log.warning("S&P 500 Wikipedia 失敗：%s", e)
+
+    log.warning("S&P 500 使用內建後備名單 %d 隻", len(FALLBACK))
     return [{"symbol": s, "name": s, "sector": ""} for s in FALLBACK]
 
 
+def get_sp400() -> list[dict]:
+    """回傳 S&P 400 candidates；優先 iShares IJH，Wikipedia 作後備。"""
+    return _get_index_candidates("sp400")
+
+
+def get_sp600() -> list[dict]:
+    """回傳 S&P 600 candidates；優先 iShares IJR，Wikipedia 作後備。"""
+    return _get_index_candidates("sp600")
+
+
 def get_sp1500() -> list[dict]:
-    """回傳 S&P 500 + 400 + 600 合併名單（去重，同一代號以先出現嗰個為準）。
-    S&P 500 用穩陣嘅 CSV 來源做底，即使 Wikipedia 畀擋（400/600 攞唔到），
-    仍然可以攞返約 500 隻，而唔係跌落去得 60 隻嗰個極端後備。"""
+    """回傳 S&P 500 + 400 + 600 合併池。
+
+    任何一個來源失敗都只會少嗰一個 index；唔會用 60 隻 fallback 代替整個
+    S&P 1500，而且會清楚喺 log 顯示各池實際數量。
+    """
+    groups = {
+        "sp500": get_sp500(),
+        "sp400": get_sp400(),
+        "sp600": get_sp600(),
+    }
     merged: dict[str, dict] = {}
-    for r in get_sp500():
-        merged.setdefault(r["symbol"], r)
-    base_count = len(merged)
-    for key in ("sp400", "sp600"):
-        try:
-            rows = _read_wiki_table(WIKI_URLS[key])
-            for r in rows:
-                merged.setdefault(r["symbol"], r)
-            log.info("Wikipedia %s 取得 %d 隻", key, len(rows))
-        except Exception as e:  # noqa: BLE001
-            log.warning("Wikipedia %s 抓取失敗（%s），跳過呢個池（S&P 1500 池會縮水）", key, e)
-    if len(merged) == base_count:
-        log.warning("S&P 400/600 兩個都攞唔到，今次 sp1500 池實際上只有 S&P 500 嘅 %d 隻", base_count)
-    log.info("S&P 1500 合併池共 %d 隻（去重後）", len(merged))
+    for rows in groups.values():
+        for row in rows:
+            merged.setdefault(row["symbol"], row)
+
+    log.info(
+        "S&P pools：500=%d, 400=%d, 600=%d, 合併去重=%d",
+        len(groups["sp500"]), len(groups["sp400"]), len(groups["sp600"]), len(merged),
+    )
     return list(merged.values())
 
 
+def get_sec_candidates() -> list[dict]:
+    """SEC 全市場候選代號。
+
+    呢個係 candidate source，並唔代表每一隻都係可交易 US common stock；
+    data.py 必須再用 price / volume / market cap pre-filter。
+    """
+    try:
+        rows = _read_sec_tickers()
+        log.info("SEC company_tickers.json 取得 %d 隻候選代號", len(rows))
+        return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("SEC 代號表失敗：%s", e)
+        return []
+
+
+def build_universe() -> tuple[list[dict], list[dict]]:
+    """回傳 (core, extra)。
+
+    core = S&P 1500；extra = SEC candidates 扣除 core。
+    main.py 再決定邊啲 extra 通過市值/流動性 pre-filter。
+    """
+    core = get_sp1500()
+    seen = {r["symbol"] for r in core}
+    extra = [r for r in get_sec_candidates() if r["symbol"] not in seen]
+    log.info("Broad candidate pool：core=%d, SEC long-tail=%d, total=%d", len(core), len(extra), len(core) + len(extra))
+    return core, extra
+
+
+def get_broad_market() -> tuple[list[dict], list[dict]]:
+    """向下兼容舊 API；正式流程可直接用 build_universe()。"""
+    return build_universe()
+
+
 def get_universe(mode: str = "sp1500") -> list[dict]:
-    """統一入口：mode = 'sp500' / 'sp1500' / 'broad'（sp1500 + SEC 長尾，向下兼容用；
-    正式流程請用 get_broad_market()，可以分開核心池同長尾嚴格把關）。"""
+    """統一入口：sp500 / sp1500 / broad。"""
     if mode == "sp500":
         return get_sp500()
     if mode == "sp1500":
         return get_sp1500()
-    core, extra = get_broad_market()
-    return core + extra
+    if mode == "broad":
+        core, extra = build_universe()
+        return core + extra
+    raise ValueError(f"unknown universe mode: {mode}")
+
+
+def _get_index_candidates(index: str) -> list[dict]:
+    try:
+        rows = _read_ishares_csv(ISHARES_URLS[index])
+        if rows:
+            log.info("iShares %s 取得 %d 隻 candidates", index, len(rows))
+            return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("iShares %s 失敗：%s", index, e)
+
+    try:
+        rows = _read_wiki_table(WIKI_URLS[index])
+        if rows:
+            log.info("Wikipedia %s 取得 %d 隻 candidates", index, len(rows))
+            return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("Wikipedia %s 失敗：%s", index, e)
+
+    log.warning("%s 今次無法取得 constituents；不自行捏造名單", index)
+    return []
+
+
+def _read_sp500_csv() -> list[dict]:
+    resp = requests.get(
+        SP500_CSV_URL,
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    reader = csv.DictReader(io.StringIO(resp.text))
+    out = []
+    for row in reader:
+        sym = _normalise_symbol(row.get("Symbol", ""))
+        if not _valid_symbol(sym):
+            continue
+        out.append({
+            "symbol": sym,
+            "name": row.get("Security", sym),
+            "sector": row.get("GICS Sector", ""),
+        })
+    return _dedupe(out)
+
+
+def _read_ishares_csv(url: str) -> list[dict]:
+    """解析 iShares holdings CSV；跳過 metadata，保留 Asset Class=Equity。"""
+    resp = requests.get(
+        url,
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    lines = resp.text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        first = line.split(",", 1)[0].strip().strip('"')
+        if first == "Ticker":
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("iShares response does not contain holdings CSV header")
+
+    reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
+    out = []
+    for row in reader:
+        sym = _normalise_symbol(row.get("Ticker", ""))
+        asset_class = str(row.get("Asset Class") or "").strip()
+        if asset_class != "Equity" or not _valid_symbol(sym):
+            continue
+        out.append({"symbol": sym, "name": sym, "sector": ""})
+    return _dedupe(out)
 
 
 def _read_sec_tickers() -> list[dict]:
@@ -105,45 +265,15 @@ def _read_sec_tickers() -> list[dict]:
     data = resp.json()
     out = []
     for row in data.values():
-        sym = str(row.get("ticker", "")).strip().upper()
-        if not sym or not _TICKER_RE.match(sym):
-            continue  # 濾走明顯唔係普通股代號嘅雜訊（基金份額、奇怪代號等）
-        out.append({"symbol": sym, "name": str(row.get("title", sym)), "sector": ""})
-    return out
-
-
-def get_broad_market() -> tuple[list[dict], list[dict]]:
-    """回傳 (core, extra)：
-      • core  —— S&P 1500（有 GICS 板塊資料，如果 Wikipedia 畀擋就淨係 S&P 500）
-      • extra —— SEC 全市場代號表當中扣走 core 已有嗰啲之後嘅長尾（冇板塊資料，
-                  冇市值資料，靠 main.py 用 data.prefilter_liquidity(min_market_cap=...,
-                  fail_open=False) 嚴格篩走冇報價/細市值/低流動性嗰批，先至會落歷史數據）。
-    """
-    core = get_sp1500()
-    seen = {r["symbol"] for r in core}
-    try:
-        sec_rows = _read_sec_tickers()
-        log.info("SEC company_tickers.json 取得 %d 隻候選代號", len(sec_rows))
-    except Exception as e:  # noqa: BLE001
-        log.warning("SEC 代號表抓取失敗（%s），今次冇長尾，淨係得 sp1500 核心池", e)
-        sec_rows = []
-    extra = [r for r in sec_rows if r["symbol"] not in seen]
-    return core, extra
-
-
-def _read_sp500_csv() -> list[dict]:
-    resp = requests.get(SP500_CSV_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
-    reader = csv.DictReader(io.StringIO(resp.text))
-    out = []
-    for row in reader:
-        sym = row["Symbol"].strip().replace(".", "-")  # BRK.B -> BRK-B (yahoo 格式)
+        sym = _normalise_symbol(row.get("ticker", ""))
+        if not _valid_symbol(sym):
+            continue
         out.append({
             "symbol": sym,
-            "name": row.get("Security", sym),
-            "sector": row.get("GICS Sector", ""),
+            "name": str(row.get("title", sym)),
+            "sector": "",
         })
-    return out
+    return _dedupe(out)
 
 
 def _read_wiki_table(url: str) -> list[dict]:
@@ -152,21 +282,40 @@ def _read_wiki_table(url: str) -> list[dict]:
     resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     dfs = pd.read_html(resp.text)
-    df = dfs[0]
+    if not dfs:
+        return []
+
+    # 唔假設第一張 table 永遠係 constituents；搵有 Symbol 欄嗰張。
+    target = None
+    for df in dfs:
+        if "Symbol" in df.columns:
+            target = df
+            break
+    if target is None:
+        return []
+
     out = []
-    for _, r in df.iterrows():
-        sym = str(r["Symbol"]).strip().replace(".", "-")  # BRK.B -> BRK-B (yahoo 格式)
+    for _, row in target.iterrows():
+        sym = _normalise_symbol(row.get("Symbol", ""))
+        if not _valid_symbol(sym):
+            continue
         out.append({
             "symbol": sym,
-            "name": str(r.get("Security", r.get("Company", sym))),
-            "sector": str(r.get("GICS Sector", "")),
+            "name": str(row.get("Security", row.get("Company", sym))),
+            "sector": str(row.get("GICS Sector", "")),
         })
-    return out
+    return _dedupe(out)
 
 
-# 向下兼容舊名（有其他腳本可能仲引用緊呢個名）
+# 向下兼容舊名；其他腳本如果仲引用 pd_read_wiki，可以繼續運作。
 pd_read_wiki = lambda: _read_wiki_table(WIKI_URLS["sp500"])  # noqa: E731
 
 
 if __name__ == "__main__":
-    print(json.dumps(get_universe("sp1500")[:5], ensure_ascii=False, indent=2))
+    core, extra = build_universe()
+    print(json.dumps({
+        "core": len(core),
+        "extra": len(extra),
+        "total": len(core) + len(extra),
+        "sample": (core + extra)[:10],
+    }, ensure_ascii=False, indent=2))
