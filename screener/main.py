@@ -49,8 +49,6 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
     }
     if universe_mode in {"sp1500", "broad"}:
         raw_counts["sp1500"] = len(core)
-        # get_broad_market() returns the three index components merged into core;
-        # get_universe() has already normalised/deduped them, so these are diagnostic only.
         if universe_mode == "broad":
             try:
                 raw_counts["sp500"] = len(get_universe("sp500"))
@@ -74,10 +72,12 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
     quote_map = {}
 
     if prefilter:
-        # 核心池：冇 quote 時 fail-open，避免 Yahoo 暫時漏報導致 S&P1500 成員被誤刪。
+        # 核心池同樣套用股價/成交量/市值門檻；Yahoo quote UNKNOWN 時 fail-open，
+        # 避免短暫 API 異常令原本合資格嘅 S&P 成員被誤刪。
         core_syms = [u["symbol"] for u in core]
         core_screen = data_mod.screen_quotes(
-            core_syms, min_price=min_price, min_avg_vol=min_avg_vol, min_market_cap=0
+            core_syms, min_price=min_price, min_avg_vol=min_avg_vol,
+            min_market_cap=min_market_cap
         ) if core_syms else {"passed": [], "failed": [], "unknown": [], "quotes": {},
                               "stats": quote_stats["core"]}
         quote_map.update(core_screen["quotes"])
@@ -97,15 +97,12 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
         extra_kept = set(extra_screen["passed"])
         extra = [u for u in extra if u["symbol"] in extra_kept]
     else:
-        # Debug 模式仍然只允許核心池；否則會把 SEC 全市場候選直接送入歷史 API。
         log.warning("--no-prefilter：停用 quote 初篩，長尾候選一律捨棄")
         extra = []
 
     qualified = core + extra
     qualified_before_cap = len(qualified)
 
-    # 唔再用「list 順序」硬截 1500。先按 quote 市值/流動性排序，再決定歷史下載名額。
-    # 這樣 broad 模式即使有 2,000-3,000 隻合資格股票，都會優先保留真正活躍的大型股票。
     qualified.sort(key=lambda u: _quote_rank(u["symbol"], quote_map), reverse=True)
     if max_universe and len(qualified) > max_universe:
         log.info("合資格池 %d 隻 > 歷史下載上限 %d，按市值/流動性排序後保留 %d 隻",
@@ -125,7 +122,6 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
     spy_close = spy["close"] if spy else []
     ratings = stage2.rs_ratings(all_data, spy_close)
 
-    # 大市 + 板塊相對強弱要喺掃描前攞好，先可以逐隻股票對應加分
     try:
         market = market_status()
     except Exception as e:  # noqa: BLE001
@@ -150,8 +146,6 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
         if not pat:
             continue
         pattern_matches += 1
-        # Step 1 加分制：板塊強弱唔用嚟剔除股票（Stage 2 + 杯柄照樣獨立篩），
-        # 淨係影響 🔥 標記同排序——強股都可以嚟自中性/冇對應 GICS 嘅主題板塊。
         st = sector_tag(u["sector"], rel_map)
         entry = {
             "symbol": sym, "name": u["name"], "sector": u["sector"],
@@ -162,7 +156,6 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
             results.append(entry)
         else:
             watchlist.append(entry)
-        # 網頁 K 線圖數據（杯口前 20 日起）
         cs = pat["chart_start"]
         charts[sym] = {
             "dates": d["dates"][cs:], "open": d["open"][cs:], "high": d["high"][cs:],
@@ -173,7 +166,6 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
         }
 
     def sort_key(e: dict):
-        # 強勢板塊排前，弱勢排後，中性/冇對應板塊企中間；同層再按 RS 評級排。
         return (STRENGTH_ORDER[e["sector_strength"]["tier"]], -e["stage2"]["values"]["rs_rating"])
 
     results.sort(key=sort_key)
@@ -218,7 +210,7 @@ if __name__ == "__main__":
     ap.add_argument("--min-price", type=float, default=10.0, help="初篩：最低股價")
     ap.add_argument("--min-avg-vol", type=int, default=500_000, help="初篩：最低3個月日均成交量")
     ap.add_argument("--min-market-cap", type=int, default=2_000_000_000,
-                     help="長尾初篩：最低市值（美元），預設 20 億")
+                     help="初篩：最低市值（美元），預設 20 億")
     ap.add_argument("--max-universe", type=int, default=3000,
                      help="篩後最終下載池嘅隻數上限（按市值/流動性排序），0 = 不限")
     a = ap.parse_args()
