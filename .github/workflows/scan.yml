@@ -20,10 +20,9 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas lxml
       - name: Run screener
-        # --universe broad：sp1500（有 GICS 板塊）+ SEC 全市場長尾（冇板塊，但用
-        # --min-market-cap 同 --min-avg-vol 嚴格把關，唔會落未經驗證嘅細價股歷史數據）
-        # --max-universe 1500：篩後最終落歷史 K 線嘅隻數上限，核心池優先保留
-        run: python screener/main.py --pause 0.35 --universe broad --min-market-cap 2000000000 --max-universe 1500
+        # broad：S&P1500 + SEC 全市場長尾；先用 Yahoo quote 做廉價初篩，
+        # 再按市值/流動性排序，最多下載 3,000 隻 2 年歷史 K 線。
+        run: python screener/main.py --pause 0.35 --universe broad --min-market-cap 2000000000 --max-universe 3000
       - name: Commit results
         run: |
           git config user.name "screener-bot"
