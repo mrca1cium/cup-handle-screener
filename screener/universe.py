@@ -148,23 +148,13 @@ def get_sp1500() -> list[dict]:
 
 
 def get_nasdaq_candidates() -> list[dict]:
-    """取得 Nasdaq public stock screener；回傳 ticker + metadata。
-
-    Nasdaq screener 本身已提供 price / current volume / market cap，因此呢層
-    可以先做非常便宜嘅市場篩選；真正嘅平均成交量仍會喺 historical stage
-    用 2y bars 計算。
-    """
+    """取得 Nasdaq public stock screener；回傳 ticker + metadata。"""
     rows: list[dict] = []
     limit = 5000
     offset = 0
     max_pages = 3
     for _ in range(max_pages):
-        params = {
-            "tableonly": "true",
-            "limit": str(limit),
-            "offset": str(offset),
-            "download": "true",
-        }
+        params = {"tableonly": "true", "limit": str(limit), "offset": str(offset), "download": "true"}
         last_error = None
         for attempt in range(3):
             try:
@@ -213,12 +203,25 @@ def build_universe() -> tuple[list[dict], list[dict]]:
     core = get_sp1500()
     seen = {r["symbol"] for r in core}
     market = get_nasdaq_candidates()
+    market_map = {r["symbol"]: r for r in market}
+
+    # 將 Nasdaq metadata 合併入 S&P core，令所有股票都可以先做 price / market-cap
+    # cheap filter，而唔需要再用 Yahoo crumb quote endpoint。
+    enriched_core = []
+    for row in core:
+        extra = market_map.get(row["symbol"], {})
+        merged = dict(row)
+        for key in ("price", "current_volume", "market_cap", "exchange", "industry"):
+            if extra.get(key) is not None:
+                merged[key] = extra[key]
+        enriched_core.append(merged)
+
     extra = [r for r in market if r["symbol"] not in seen]
     log.info(
         "Broad candidate pool：core=%d, Nasdaq long-tail=%d, total=%d",
-        len(core), len(extra), len(core) + len(extra),
+        len(enriched_core), len(extra), len(enriched_core) + len(extra),
     )
-    return core, extra
+    return enriched_core, extra
 
 
 def get_broad_market() -> tuple[list[dict], list[dict]]:
