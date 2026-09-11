@@ -2,21 +2,21 @@ from __future__ import annotations
 """股票池來源。
 
 架構：
-  1. S&P 500：GitHub static CSV 為主要來源。
-  2. S&P 400 / 600：Wikipedia 為主要來源；iShares 只作 optional fallback。
-  3. SEC company_tickers.json：提供 S&P 1500 以外嘅長尾候選股。
+  1. S&P 500 / 400 / 600：建立核心池。
+  2. Nasdaq public screener：補充 S&P1500 以外嘅美股長尾，並提供廉價嘅
+     price / current-volume / market-cap metadata。
+  3. data.py 只喺通過廉價 metadata filter 後下載 2y 日線，避免對全市場逐隻下載。
 
-重要：呢個 module 只負責「候選股票池」，唔做市值/成交量篩選；
-data.py 會用 Yahoo quote 做廉價 pre-filter，避免對幾千隻股票逐隻下載 2y 日線。
+SEC company_tickers.json 不再作 long-tail source，因為 GitHub Actions / 本機
+環境容易遇到 SEC 403；iShares 亦只作 S&P400/600 fallback。
 """
 
 import csv
 import io
 import json
 import logging
-import os
 import re
-from pathlib import Path
+import time
 
 import requests
 
@@ -44,13 +44,12 @@ WIKI_URLS = {
     "sp600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
 }
 
-SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_HEADERS = {
-    "User-Agent": os.getenv(
-        "SEC_USER_AGENT",
-        "mrca1cium/cup-handle-screener contact: actions@github.com",
-    ),
-    "Accept-Encoding": "gzip, deflate",
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
+NASDAQ_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/",
 }
 
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
@@ -81,12 +80,31 @@ def _dedupe(rows: list[dict]) -> list[dict]:
         if not _valid_symbol(sym) or sym in seen:
             continue
         seen.add(sym)
-        out.append({
-            "symbol": sym,
-            "name": str(row.get("name") or sym),
-            "sector": str(row.get("sector") or ""),
-        })
+        item = dict(row)
+        item["symbol"] = sym
+        item["name"] = str(row.get("name") or sym)
+        item["sector"] = str(row.get("sector") or "")
+        out.append(item)
     return out
+
+
+def _parse_number(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace(",", "").replace("$", "")
+    if not s or s in {"-", "N/A", "NA"}:
+        return None
+    multiplier = 1.0
+    suffix = s[-1:].upper()
+    if suffix in {"K", "M", "B", "T"}:
+        multiplier = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[suffix]
+        s = s[:-1]
+    try:
+        return float(s) * multiplier
+    except ValueError:
+        return None
 
 
 def get_sp500() -> list[dict]:
@@ -97,7 +115,6 @@ def get_sp500() -> list[dict]:
             return rows
     except Exception as e:
         log.warning("S&P 500 GitHub CSV 失敗：%s", e)
-
     try:
         rows = _read_wiki_table(WIKI_URLS["sp500"])
         if rows:
@@ -105,7 +122,6 @@ def get_sp500() -> list[dict]:
             return rows
     except Exception as e:
         log.warning("S&P 500 Wikipedia 失敗：%s", e)
-
     log.warning("S&P 500 使用內建後備名單 %d 隻", len(FALLBACK))
     return [{"symbol": s, "name": s, "sector": ""} for s in FALLBACK]
 
@@ -119,16 +135,11 @@ def get_sp600() -> list[dict]:
 
 
 def get_sp1500() -> list[dict]:
-    groups = {
-        "sp500": get_sp500(),
-        "sp400": get_sp400(),
-        "sp600": get_sp600(),
-    }
+    groups = {"sp500": get_sp500(), "sp400": get_sp400(), "sp600": get_sp600()}
     merged: dict[str, dict] = {}
     for rows in groups.values():
         for row in rows:
             merged.setdefault(row["symbol"], row)
-
     log.info(
         "S&P pools：500=%d, 400=%d, 600=%d, 合併去重=%d",
         len(groups["sp500"]), len(groups["sp400"]), len(groups["sp600"]), len(merged),
@@ -136,21 +147,77 @@ def get_sp1500() -> list[dict]:
     return list(merged.values())
 
 
+def get_nasdaq_candidates() -> list[dict]:
+    """取得 Nasdaq public stock screener；回傳 ticker + metadata。
+
+    Nasdaq screener 本身已提供 price / current volume / market cap，因此呢層
+    可以先做非常便宜嘅市場篩選；真正嘅平均成交量仍會喺 historical stage
+    用 2y bars 計算。
+    """
+    rows: list[dict] = []
+    limit = 5000
+    offset = 0
+    max_pages = 3
+    for _ in range(max_pages):
+        params = {
+            "tableonly": "true",
+            "limit": str(limit),
+            "offset": str(offset),
+            "download": "true",
+        }
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(NASDAQ_SCREENER_URL, params=params, headers=NASDAQ_HEADERS, timeout=30)
+                resp.raise_for_status()
+                data = resp.json().get("data") or {}
+                batch = data.get("rows") or []
+                if not batch:
+                    return _dedupe(rows)
+                rows.extend(_nasdaq_row(r) for r in batch)
+                log.info("Nasdaq screener：offset=%d 取得 %d 隻", offset, len(batch))
+                if len(batch) < limit:
+                    return _dedupe(rows)
+                offset += limit
+                break
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                if attempt < 2:
+                    time.sleep(2 + attempt * 3)
+        else:
+            raise RuntimeError(f"Nasdaq screener failed at offset {offset}: {last_error}")
+    return _dedupe(rows)
+
+
+def _nasdaq_row(row: dict) -> dict:
+    sym = _normalise_symbol(row.get("symbol", ""))
+    return {
+        "symbol": sym,
+        "name": str(row.get("name") or sym),
+        "sector": str(row.get("sector") or ""),
+        "price": _parse_number(row.get("lastsale")),
+        "current_volume": _parse_number(row.get("volume")),
+        "market_cap": _parse_number(row.get("marketCap")),
+        "exchange": str(row.get("exchange") or ""),
+        "industry": str(row.get("industry") or ""),
+    }
+
+
 def get_sec_candidates() -> list[dict]:
-    try:
-        rows = _read_sec_tickers()
-        log.info("SEC company_tickers.json 取得 %d 隻候選代號", len(rows))
-        return rows
-    except Exception as e:
-        log.warning("SEC 代號表失敗：%s", e)
-        return []
+    """Backward-compatible stub; SEC is no longer used for broad universe."""
+    log.info("SEC long-tail source 已停用；改用 Nasdaq screener")
+    return []
 
 
 def build_universe() -> tuple[list[dict], list[dict]]:
     core = get_sp1500()
     seen = {r["symbol"] for r in core}
-    extra = [r for r in get_sec_candidates() if r["symbol"] not in seen]
-    log.info("Broad candidate pool：core=%d, SEC long-tail=%d, total=%d", len(core), len(extra), len(core) + len(extra))
+    market = get_nasdaq_candidates()
+    extra = [r for r in market if r["symbol"] not in seen]
+    log.info(
+        "Broad candidate pool：core=%d, Nasdaq long-tail=%d, total=%d",
+        len(core), len(extra), len(core) + len(extra),
+    )
     return core, extra
 
 
@@ -170,8 +237,6 @@ def get_universe(mode: str = "sp1500") -> list[dict]:
 
 
 def _get_index_candidates(index: str) -> list[dict]:
-    # Wikipedia is currently the more reliable source for the constituent tables;
-    # iShares has periodically changed its export response format.
     try:
         rows = _read_wiki_table(WIKI_URLS[index])
         if rows:
@@ -179,7 +244,6 @@ def _get_index_candidates(index: str) -> list[dict]:
             return rows
     except Exception as e:
         log.warning("Wikipedia %s 失敗：%s", index, e)
-
     try:
         rows = _read_ishares_csv(ISHARES_URLS[index])
         if rows:
@@ -187,7 +251,6 @@ def _get_index_candidates(index: str) -> list[dict]:
             return rows
     except Exception as e:
         log.warning("iShares %s 失敗：%s", index, e)
-
     log.warning("%s 今次無法取得 constituents；不自行捏造名單", index)
     return []
 
@@ -201,11 +264,7 @@ def _read_sp500_csv() -> list[dict]:
         sym = _normalise_symbol(row.get("Symbol", ""))
         if not _valid_symbol(sym):
             continue
-        out.append({
-            "symbol": sym,
-            "name": row.get("Security", sym),
-            "sector": row.get("GICS Sector", ""),
-        })
+        out.append({"symbol": sym, "name": row.get("Security", sym), "sector": row.get("GICS Sector", "")})
     return _dedupe(out)
 
 
@@ -221,7 +280,6 @@ def _read_ishares_csv(url: str) -> list[dict]:
             break
     if header_idx is None:
         raise ValueError("iShares response does not contain holdings CSV header")
-
     reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
     out = []
     for row in reader:
@@ -233,40 +291,16 @@ def _read_ishares_csv(url: str) -> list[dict]:
     return _dedupe(out)
 
 
-def _read_sec_tickers() -> list[dict]:
-    resp = requests.get(SEC_TICKERS_URL, timeout=30, headers=SEC_HEADERS)
-    resp.raise_for_status()
-    data = resp.json()
-    out = []
-    for row in data.values():
-        sym = _normalise_symbol(row.get("ticker", ""))
-        if not _valid_symbol(sym):
-            continue
-        out.append({
-            "symbol": sym,
-            "name": str(row.get("title", sym)),
-            "sector": "",
-        })
-    return _dedupe(out)
-
-
 def _read_wiki_table(url: str) -> list[dict]:
     import pandas as pd
-
     resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     dfs = pd.read_html(resp.text)
     if not dfs:
         return []
-
-    target = None
-    for df in dfs:
-        if "Symbol" in df.columns:
-            target = df
-            break
+    target = next((df for df in dfs if "Symbol" in df.columns), None)
     if target is None:
         return []
-
     out = []
     for _, row in target.iterrows():
         sym = _normalise_symbol(row.get("Symbol", ""))
@@ -286,8 +320,6 @@ pd_read_wiki = lambda: _read_wiki_table(WIKI_URLS["sp500"])  # noqa: E731
 if __name__ == "__main__":
     core, extra = build_universe()
     print(json.dumps({
-        "core": len(core),
-        "extra": len(extra),
-        "total": len(core) + len(extra),
+        "core": len(core), "extra": len(extra), "total": len(core) + len(extra),
         "sample": (core + extra)[:10],
     }, ensure_ascii=False, indent=2))
