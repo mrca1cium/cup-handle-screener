@@ -1,9 +1,17 @@
 from __future__ import annotations
-"""Yahoo Finance data layer: quote pre-screen -> historical daily data."""
+"""Yahoo Finance data layer: short chart checks + historical daily data.
+
+重要：不再使用 Yahoo v7/finance/quote + crumb/cookie。
+Yahoo 目前對該 endpoint 容易回 401/429；v8/finance/chart 則可直接提供
+OHLCV，而且不需要 crumb。Broad universe 嘅 price / market-cap / current-volume
+metadata 由 universe.py 嘅 Nasdaq screener 提供。
+"""
+
 import logging
 import random
 import time
 from typing import Optional
+
 import requests
 
 log = logging.getLogger(__name__)
@@ -12,146 +20,136 @@ HEADERS = {
     "Accept": "application/json,text/plain,*/*",
 }
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
-CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
-COOKIE_URL = "https://fc.yahoo.com"
 RETRIES = 3
-QUOTE_BATCH_SIZE = 50
 DEFAULT_MIN_BARS = 252
+
 
 class QuoteStatus:
     PASS = "PASS"
     FAIL = "FAIL"
     UNKNOWN = "UNKNOWN"
 
+
 def _backoff(attempt: int, base: float, cap: float) -> float:
     return min(cap, base * (2 ** attempt)) + random.uniform(0, 1.5)
 
-def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> Optional[dict]:
+
+def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
     params = {"range": range_, "interval": "1d", "events": "div,splits"}
     for attempt in range(RETRIES):
         try:
-            r = requests.get(CHART_URL.format(symbol=symbol), params=params, headers=HEADERS, timeout=30)
+            r = requests.get(CHART_URL.format(symbol=symbol), params=params, headers=HEADERS, timeout=timeout)
             if r.status_code == 429:
-                wait = _backoff(attempt, 20, 120)
+                wait = _backoff(attempt, 10, 90)
                 log.warning("%s 被限流，等 %.1fs 重試", symbol, wait)
                 time.sleep(wait)
                 continue
             r.raise_for_status()
-            res = (r.json().get("chart", {}).get("result") or [])
-            if not res:
-                log.info("%s 無歷史數據", symbol)
+            result = (r.json().get("chart", {}).get("result") or [])
+            if not result:
                 return None
-            res = res[0]
-            ts = res.get("timestamp") or []
-            quote = (res.get("indicators", {}).get("quote") or [{}])[0]
-            rows = [(t, o, h, l, c, v) for t, o, h, l, c, v in zip(ts, quote.get("open", []), quote.get("high", []), quote.get("low", []), quote.get("close", []), quote.get("volume", [])) if c is not None and v is not None]
-            if len(rows) < min_bars:
-                log.info("%s 數據不足（%d bars，要求 %d）", symbol, len(rows), min_bars)
-                return None
-            return {"dates": [d2s(t) for t, *_ in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
+            return result[0]
         except Exception as e:  # noqa: BLE001
-            log.warning("%s 第 %d 次失敗: %s", symbol, attempt + 1, e)
+            log.warning("%s chart 第 %d 次失敗: %s", symbol, attempt + 1, e)
             if attempt < RETRIES - 1:
-                time.sleep(_backoff(attempt, 5, 30))
+                time.sleep(_backoff(attempt, 4, 30))
     return None
+
+
+def _rows_from_result(res: dict) -> list[tuple]:
+    ts = res.get("timestamp") or []
+    quote = (res.get("indicators", {}).get("quote") or [{}])[0]
+    opens = quote.get("open", [])
+    highs = quote.get("high", [])
+    lows = quote.get("low", [])
+    closes = quote.get("close", [])
+    volumes = quote.get("volume", [])
+    return [
+        (t, o, h, l, c, v)
+        for t, o, h, l, c, v in zip(ts, opens, highs, lows, closes, volumes)
+        if c is not None and v is not None
+    ]
+
+
+def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> Optional[dict]:
+    res = _chart(symbol, range_)
+    if not res:
+        log.info("%s 無歷史數據", symbol)
+        return None
+    rows = _rows_from_result(res)
+    if len(rows) < min_bars:
+        log.info("%s 數據不足（%d bars，要求 %d）", symbol, len(rows), min_bars)
+        return None
+    return {
+        "dates": [d2s(t) for t, *_ in rows],
+        "open": [r[1] for r in rows],
+        "high": [r[2] for r in rows],
+        "low": [r[3] for r in rows],
+        "close": [r[4] for r in rows],
+        "volume": [r[5] for r in rows],
+    }
+
 
 def d2s(ts: int) -> str:
     import datetime
     return datetime.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
 
-def _new_yahoo_session() -> tuple[requests.Session, str | None]:
-    """建立 Yahoo cookie + crumb session；v7 quote endpoint 自 2024 起需要兩者。"""
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    try:
-        # fc.yahoo.com 通常會設定 A1/A3 session cookie；404/403 本身不重要。
-        session.get(COOKIE_URL, timeout=15)
-        crumb = session.get(CRUMB_URL, timeout=15)
-        crumb.raise_for_status()
-        value = crumb.text.strip()
-        return session, value or None
-    except Exception as e:  # noqa: BLE001
-        log.warning("Yahoo quote session/crumb 初始化失敗：%s", e)
-        return session, None
 
-def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
-    """批量取得 quote；Yahoo v7 quote 需要 cookie+crumb，失敗時不把 UNKNOWN 當 FAIL。"""
+def fetch_short(symbol: str, range_: str = "3mo", min_bars: int = 20) -> Optional[dict]:
+    """Compatibility helper：用 chart endpoint 做短期 quote / average-volume 檢查。"""
+    res = _chart(symbol, range_)
+    if not res:
+        return None
+    rows = _rows_from_result(res)
+    if len(rows) < min_bars:
+        return None
+    meta = res.get("meta") or {}
+    closes = [r[4] for r in rows]
+    volumes = [r[5] for r in rows]
+    return {
+        "price": meta.get("regularMarketPrice") or closes[-1],
+        "avg_vol": sum(volumes) / len(volumes),
+        "market_cap": None,
+        "bars": len(rows),
+    }
+
+
+def screen_quotes(symbols: list[str], pause: float = 0.35, min_price: float = 10.0,
+                  min_avg_vol: int = 500_000, min_market_cap: int = 0) -> dict:
+    """Compatibility API：用 v8 chart 做短期檢查，不再碰 crumb endpoint。"""
     out: dict[str, dict] = {}
-    session, crumb = _new_yahoo_session()
-    if not crumb:
-        log.warning("無法取得 Yahoo crumb；quote pre-filter 今次全部 UNKNOWN")
-        return out
-
-    for i in range(0, len(symbols), QUOTE_BATCH_SIZE):
-        batch = symbols[i:i + QUOTE_BATCH_SIZE]
-        success = False
-        for attempt in range(RETRIES):
-            try:
-                r = session.get(
-                    QUOTE_URL,
-                    params={"symbols": ",".join(batch), "crumb": crumb, "region": "US", "lang": "en-US"},
-                    timeout=30,
-                )
-                if r.status_code == 401:
-                    # Crumb/cookie 可能過期；重新建立一次 session 再重試。
-                    session, crumb = _new_yahoo_session()
-                    if not crumb:
-                        raise RuntimeError("Yahoo crumb unavailable after 401")
-                    continue
-                if r.status_code == 429:
-                    wait = _backoff(attempt, 15, 90)
-                    log.warning("quote batch 被限流，等 %.1fs 重試", wait)
-                    time.sleep(wait)
-                    continue
-                r.raise_for_status()
-                for q in r.json().get("quoteResponse", {}).get("result", []):
-                    sym = str(q.get("symbol") or "").upper()
-                    if sym:
-                        out[sym] = {
-                            "price": q.get("regularMarketPrice"),
-                            "avg_vol": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day"),
-                            "market_cap": q.get("marketCap"),
-                        }
-                success = True
-                break
-            except Exception as e:  # noqa: BLE001
-                log.warning("quote batch 第 %d 次失敗：%s", attempt + 1, e)
-                if attempt < RETRIES - 1:
-                    time.sleep(_backoff(attempt, 5, 30))
-        if not success:
-            log.warning("quote batch 完全失敗：%d 隻標記 UNKNOWN", len(batch))
-        if i + QUOTE_BATCH_SIZE < len(symbols):
-            time.sleep(pause)
-    return out
-
-def screen_quotes(symbols: list[str], min_price: float = 10.0, min_avg_vol: int = 500_000, min_market_cap: int = 0) -> dict:
-    """將 symbols 分成 PASS / FAIL / UNKNOWN；UNKNOWN 唔等於 FAIL。"""
-    quotes = fetch_quotes(symbols)
     passed, failed, unknown = [], [], []
-    quote_map: dict[str, dict] = {}
-    for symbol in symbols:
-        q = quotes.get(symbol)
-        if not q or q.get("price") is None or q.get("avg_vol") is None:
+    for i, symbol in enumerate(symbols):
+        q = fetch_short(symbol)
+        if not q:
             unknown.append(symbol)
-            continue
-        quote_map[symbol] = q
-        if q["price"] < min_price or q["avg_vol"] < min_avg_vol:
-            failed.append(symbol)
-        elif min_market_cap and (q.get("market_cap") is None or q.get("market_cap") < min_market_cap):
+        elif q["price"] < min_price or q["avg_vol"] < min_avg_vol:
             failed.append(symbol)
         else:
+            out[symbol] = q
             passed.append(symbol)
+        if i + 1 < len(symbols):
+            time.sleep(pause)
     stats = {"input": len(symbols), "passed": len(passed), "failed": len(failed), "unknown": len(unknown)}
-    log.info("quote 初篩：%d → PASS %d / FAIL %d / UNKNOWN %d", len(symbols), len(passed), len(failed), len(unknown))
-    return {"passed": passed, "failed": failed, "unknown": unknown, "quotes": quote_map, "stats": stats}
+    return {"passed": passed, "failed": failed, "unknown": unknown, "quotes": out, "stats": stats}
 
-def prefilter_liquidity(symbols: list[str], min_price: float = 10.0, min_avg_vol: int = 500_000, min_market_cap: int = 0, fail_open: bool = True) -> list[str]:
-    """舊 API wrapper：fail_open=True 回傳 PASS+UNKNOWN；否則只回傳 PASS。"""
-    screened = screen_quotes(symbols, min_price, min_avg_vol, min_market_cap)
+
+def prefilter_liquidity(symbols: list[str], min_price: float = 10.0, min_avg_vol: int = 500_000,
+                        min_market_cap: int = 0, fail_open: bool = True) -> list[str]:
+    screened = screen_quotes(symbols, min_price=min_price, min_avg_vol=min_avg_vol,
+                             min_market_cap=min_market_cap)
     return screened["passed"] + screened["unknown"] if fail_open else screened["passed"]
 
-def fetch_many(symbols: list[str], pause: float = 0.35, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> dict[str, dict]:
+
+def average_volume(data: dict, bars: int = 63) -> float:
+    vols = [v for v in data.get("volume", []) if v is not None]
+    if not vols:
+        return 0.0
+    return sum(vols[-bars:]) / min(len(vols), bars)
+
+
+def fetch_many(symbols: list[str], pause: float = 0.35, range_: str = "2y",
+               min_bars: int = DEFAULT_MIN_BARS) -> dict[str, dict]:
     """逐隻下載歷史日線，保持低頻率以減低 Yahoo rate-limit 風險。"""
     out: dict[str, dict] = {}
     total = len(symbols)
@@ -165,7 +163,8 @@ def fetch_many(symbols: list[str], pause: float = 0.35, range_: str = "2y", min_
             time.sleep(pause)
     return out
 
+
 if __name__ == "__main__":
     d = fetch_daily("AAPL", "1y")
     if d:
-        print(d["dates"][-1], d["close"][-1])
+        print(d["dates"][-1], d["close"][-1], average_volume(d))
