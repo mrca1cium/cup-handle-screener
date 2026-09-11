@@ -7,9 +7,14 @@ from typing import Optional
 import requests
 
 log = logging.getLogger(__name__)
-HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Accept": "application/json"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+}
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+COOKIE_URL = "https://fc.yahoo.com"
 RETRIES = 3
 QUOTE_BATCH_SIZE = 50
 DEFAULT_MIN_BARS = 252
@@ -55,15 +60,45 @@ def d2s(ts: int) -> str:
     import datetime
     return datetime.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
 
+def _new_yahoo_session() -> tuple[requests.Session, str | None]:
+    """建立 Yahoo cookie + crumb session；v7 quote endpoint 自 2024 起需要兩者。"""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    try:
+        # fc.yahoo.com 通常會設定 A1/A3 session cookie；404/403 本身不重要。
+        session.get(COOKIE_URL, timeout=15)
+        crumb = session.get(CRUMB_URL, timeout=15)
+        crumb.raise_for_status()
+        value = crumb.text.strip()
+        return session, value or None
+    except Exception as e:  # noqa: BLE001
+        log.warning("Yahoo quote session/crumb 初始化失敗：%s", e)
+        return session, None
+
 def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
-    """批量取得 quote；Yahoo 未返回嘅 ticker 會喺 screen_quotes() 標成 UNKNOWN。"""
+    """批量取得 quote；Yahoo v7 quote 需要 cookie+crumb，失敗時不把 UNKNOWN 當 FAIL。"""
     out: dict[str, dict] = {}
+    session, crumb = _new_yahoo_session()
+    if not crumb:
+        log.warning("無法取得 Yahoo crumb；quote pre-filter 今次全部 UNKNOWN")
+        return out
+
     for i in range(0, len(symbols), QUOTE_BATCH_SIZE):
         batch = symbols[i:i + QUOTE_BATCH_SIZE]
         success = False
         for attempt in range(RETRIES):
             try:
-                r = requests.get(QUOTE_URL, params={"symbols": ",".join(batch)}, headers=HEADERS, timeout=30)
+                r = session.get(
+                    QUOTE_URL,
+                    params={"symbols": ",".join(batch), "crumb": crumb, "region": "US", "lang": "en-US"},
+                    timeout=30,
+                )
+                if r.status_code == 401:
+                    # Crumb/cookie 可能過期；重新建立一次 session 再重試。
+                    session, crumb = _new_yahoo_session()
+                    if not crumb:
+                        raise RuntimeError("Yahoo crumb unavailable after 401")
+                    continue
                 if r.status_code == 429:
                     wait = _backoff(attempt, 15, 90)
                     log.warning("quote batch 被限流，等 %.1fs 重試", wait)
@@ -73,7 +108,11 @@ def fetch_quotes(symbols: list[str], pause: float = 0.5) -> dict[str, dict]:
                 for q in r.json().get("quoteResponse", {}).get("result", []):
                     sym = str(q.get("symbol") or "").upper()
                     if sym:
-                        out[sym] = {"price": q.get("regularMarketPrice"), "avg_vol": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day"), "market_cap": q.get("marketCap")}
+                        out[sym] = {
+                            "price": q.get("regularMarketPrice"),
+                            "avg_vol": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day"),
+                            "market_cap": q.get("marketCap"),
+                        }
                 success = True
                 break
             except Exception as e:  # noqa: BLE001
