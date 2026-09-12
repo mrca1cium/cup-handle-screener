@@ -61,15 +61,15 @@ def run(limit: int = 0, pause: float = 0.35, universe_mode: str = "broad",
         "core": len(core), "sp500": 0, "sp400": 0, "sp600": 0,
         "sp1500": 0, "nasdaq_candidates": len(extra),
     }
-    if universe_mode in {"sp1500", "broad"}:
+    if universe_mode == "sp1500":
         raw_counts["sp1500"] = len(core)
-        if universe_mode == "broad":
-            try:
-                raw_counts["sp500"] = len(get_universe("sp500"))
-                raw_counts["sp400"] = len(get_universe("sp400"))
-                raw_counts["sp600"] = len(get_universe("sp600"))
-            except Exception as e:  # noqa: BLE001
-                log.warning("建立 S&P component 診斷數字失敗: %s", e)
+    elif universe_mode == "broad":
+        # get_broad_market() 已經以 S&P500/400/600 建立 core；
+        # 這裡唔再呼叫 get_universe("sp400") / ("sp600")，避免 invalid mode warning。
+        raw_counts["sp1500"] = len(core)
+        raw_counts["sp500"] = 0
+        raw_counts["sp400"] = 0
+        raw_counts["sp600"] = 0
     else:
         raw_counts[universe_mode] = len(core)
 
