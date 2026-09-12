@@ -1,7 +1,9 @@
 from __future__ import annotations
-"""Yahoo Finance data layer: historical daily data with rate-limit protection."""
+"""Yahoo Finance data layer: historical daily data with cache and rate-limit protection."""
 import datetime
+import json
 import logging
+import os
 import random
 import time
 from typing import Optional
@@ -12,22 +14,71 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 CHART_HOSTS = ["https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"]
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
+CACHE_MAX_AGE_SECONDS = 3 * 24 * 3600
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "yahoo")
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+
+class YahooRateLimitError(RuntimeError):
+    """Yahoo returned 429 on all retry attempts for a request."""
 
 
 def _backoff(attempt: int, base: float, cap: float) -> float:
     return min(cap, base * (2 ** attempt)) + random.uniform(0, 1.5)
 
 
+def _cache_path(symbol: str, range_: str) -> str:
+    safe = symbol.replace("/", "_").replace("\\", "_")
+    return os.path.join(CACHE_DIR, "%s_%s.json" % (safe, range_))
+
+
+def _load_cache(symbol: str, range_: str, min_bars: int) -> Optional[dict]:
+    if range_ != "2y":
+        return None
+    path = _cache_path(symbol, range_)
+    try:
+        if not os.path.exists(path):
+            return None
+        payload = json.load(open(path, "r", encoding="utf-8"))
+        fetched_at = float(payload.get("fetched_at", 0))
+        data = payload.get("data")
+        if not data or len(data.get("dates", [])) < min_bars:
+            return None
+        age = time.time() - fetched_at
+        if age > CACHE_MAX_AGE_SECONDS:
+            return None
+        log.info("%s 使用本地 2y cache（%.1f 小時前）", symbol, age / 3600)
+        return data
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s cache 讀取失敗：%s", symbol, e)
+        return None
+
+
+def _save_cache(symbol: str, range_: str, data: dict) -> None:
+    if range_ != "2y":
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        path = _cache_path(symbol, range_)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"fetched_at": time.time(), "range": range_, "data": data}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s cache 寫入失敗：%s", symbol, e)
+
+
 def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
     params = {"range": range_, "interval": "1d", "events": "div,splits"}
     last_error = None
+    rate_limited = False
     for attempt in range(RETRIES):
         host = CHART_HOSTS[attempt % len(CHART_HOSTS)]
         try:
             r = SESSION.get(host.format(symbol=symbol), params=params, timeout=timeout)
             if r.status_code == 429:
+                rate_limited = True
                 wait = _backoff(attempt, 25, 90)
                 log.warning("%s Yahoo 429（%s），等 %.1fs 再試", symbol, host.split("//")[1].split("/")[0], wait)
                 time.sleep(wait)
@@ -44,6 +95,8 @@ def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
             log.warning("%s chart 第 %d 次失敗: %s", symbol, attempt + 1, e)
             if attempt < RETRIES - 1:
                 time.sleep(_backoff(attempt, 5, 30))
+    if rate_limited:
+        raise YahooRateLimitError("Yahoo 429: %s" % symbol)
     if last_error:
         log.info("%s 歷史 request 放棄：%s", symbol, last_error)
     return None
@@ -58,6 +111,9 @@ def _rows_from_result(res: dict) -> list[tuple]:
 
 
 def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> Optional[dict]:
+    cached = _load_cache(symbol, range_, min_bars)
+    if cached:
+        return cached
     res = _chart(symbol, range_)
     if not res:
         log.info("%s 無歷史數據", symbol)
@@ -66,7 +122,9 @@ def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BAR
     if len(rows) < min_bars:
         log.info("%s 數據不足（%d bars，要求 %d）", symbol, len(rows), min_bars)
         return None
-    return {"dates": [d2s(t) for t, *_ in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
+    data = {"dates": [d2s(t) for t, *_ in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
+    _save_cache(symbol, range_, data)
+    return data
 
 
 def d2s(ts: int) -> str:
@@ -107,14 +165,21 @@ def average_volume(data: dict, bars: int = 63) -> float:
 
 
 def fetch_many(symbols: list[str], pause: float = 0.75, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> dict[str, dict]:
-    """逐隻下載歷史日線；429 retry 時輪換 query1/query2。"""
+    """逐隻下載歷史日線；成功結果即時寫入本地 cache；Yahoo 429 時停止 batch，方便稍後 resume。"""
     out = {}
     total = len(symbols)
     for i, sym in enumerate(symbols):
-        data = fetch_daily(sym, range_, min_bars=min_bars)
-        if data: out[sym] = data
-        if (i + 1) % 50 == 0 or i + 1 == total: log.info("歷史數據：%d/%d，成功 %d", i + 1, total, len(out))
-        if i + 1 < total: time.sleep(pause)
+        try:
+            data = fetch_daily(sym, range_, min_bars=min_bars)
+        except YahooRateLimitError:
+            log.error("Yahoo 連續 429，停止 historical batch（%d/%d）；稍後重跑會自動跳過已 cache 數據。", i, total)
+            break
+        if data:
+            out[sym] = data
+        if (i + 1) % 50 == 0 or i + 1 == total:
+            log.info("歷史數據：%d/%d，成功 %d", i + 1, total, len(out))
+        if i + 1 < total:
+            time.sleep(pause)
     return out
 
 
