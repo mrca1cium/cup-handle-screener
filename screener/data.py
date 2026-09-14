@@ -40,7 +40,8 @@ def _load_cache(symbol: str, range_: str, min_bars: int) -> Optional[dict]:
     try:
         if not os.path.exists(path):
             return None
-        payload = json.load(open(path, "r", encoding="utf-8"))
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
         fetched_at = float(payload.get("fetched_at", 0))
         data = payload.get("data")
         if not data or len(data.get("dates", [])) < min_bars:
@@ -79,9 +80,12 @@ def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
             r = SESSION.get(host.format(symbol=symbol), params=params, timeout=timeout)
             if r.status_code == 429:
                 rate_limited = True
-                wait = _backoff(attempt, 25, 90)
-                log.warning("%s Yahoo 429（%s），等 %.1fs 再試", symbol, host.split("//")[1].split("/")[0], wait)
-                time.sleep(wait)
+                if attempt < RETRIES - 1:
+                    wait = _backoff(attempt, 25, 90)
+                    log.warning("%s Yahoo 429（%s），等 %.1fs 再試", symbol, host.split("//")[1].split("/")[0], wait)
+                    time.sleep(wait)
+                else:
+                    log.error("%s Yahoo 429（%s），已達 retry 上限，停止 historical batch", symbol, host.split("//")[1].split("/")[0])
                 continue
             r.raise_for_status()
             result = (r.json().get("chart", {}).get("result") or [])
