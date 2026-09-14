@@ -162,7 +162,8 @@ def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BAR
         if fallback and len(fallback["dates"]) >= min_bars:
             _save_cache(symbol, range_, fallback, "stooq")
             return fallback
-        raise
+        log.warning("%s Stooq fallback 無足夠數據", symbol)
+        return None
     if res:
         rows = _rows_from_result(res)
         if len(rows) >= min_bars:
@@ -216,15 +217,17 @@ def average_volume(data: dict, bars: int = 63) -> float:
 
 
 def fetch_many(symbols: list[str], pause: float = 0.75, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> dict[str, dict]:
-    """逐隻下載歷史日線；Yahoo 429 時自動 fallback 至 Stooq；成功結果即時 cache。"""
+    """逐隻下載歷史日線；Yahoo 429 時自動 fallback 至 Stooq；單隻失敗會跳過並繼續。"""
     out = {}
     total = len(symbols)
     for i, sym in enumerate(symbols):
         try:
             data = fetch_daily(sym, range_, min_bars=min_bars)
-        except YahooRateLimitError:
-            log.error("%s Yahoo + Stooq historical 都未能取得數據；停止 batch（%d/%d）。", sym, i, total)
-            break
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.error("%s historical 失敗：%s；跳過並繼續（%d/%d）", sym, e, i + 1, total)
+            data = None
         if data:
             out[sym] = data
         if (i + 1) % 50 == 0 or i + 1 == total:
