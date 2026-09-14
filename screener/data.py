@@ -1,6 +1,8 @@
 from __future__ import annotations
-"""Yahoo Finance data layer: historical daily data with cache and rate-limit protection."""
+"""Market data layer: Yahoo first, Stooq fallback for historical daily data."""
+import csv
 import datetime
+import io
 import json
 import logging
 import os
@@ -12,10 +14,11 @@ import requests
 log = logging.getLogger(__name__)
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36", "Accept": "application/json,text/plain,*/*"}
 CHART_HOSTS = ["https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"]
+STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}.us&d1={d1}&d2={d2}&i=d"
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
 CACHE_MAX_AGE_SECONDS = 3 * 24 * 3600
-CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "yahoo")
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "market")
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
@@ -56,7 +59,7 @@ def _load_cache(symbol: str, range_: str, min_bars: int) -> Optional[dict]:
         return None
 
 
-def _save_cache(symbol: str, range_: str, data: dict) -> None:
+def _save_cache(symbol: str, range_: str, data: dict, source: str) -> None:
     if range_ != "2y":
         return
     try:
@@ -64,7 +67,7 @@ def _save_cache(symbol: str, range_: str, data: dict) -> None:
         path = _cache_path(symbol, range_)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"fetched_at": time.time(), "range": range_, "data": data}, f, ensure_ascii=False)
+            json.dump({"fetched_at": time.time(), "range": range_, "source": source, "data": data}, f, ensure_ascii=False)
         os.replace(tmp, path)
     except Exception as e:  # noqa: BLE001
         log.warning("%s cache 寫入失敗：%s", symbol, e)
@@ -85,7 +88,7 @@ def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
                     log.warning("%s Yahoo 429（%s），等 %.1fs 再試", symbol, host.split("//")[1].split("/")[0], wait)
                     time.sleep(wait)
                 else:
-                    log.error("%s Yahoo 429（%s），已達 retry 上限，停止 historical batch", symbol, host.split("//")[1].split("/")[0])
+                    log.error("%s Yahoo 429（%s），已達 retry 上限", symbol, host.split("//")[1].split("/")[0])
                 continue
             r.raise_for_status()
             result = (r.json().get("chart", {}).get("result") or [])
@@ -102,8 +105,41 @@ def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
     if rate_limited:
         raise YahooRateLimitError("Yahoo 429: %s" % symbol)
     if last_error:
-        log.info("%s 歷史 request 放棄：%s", symbol, last_error)
+        log.info("%s Yahoo request 放棄：%s", symbol, last_error)
     return None
+
+
+def _stooq(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
+    if range_ not in ("2y", "1y", "6mo", "3mo"):
+        return None
+    days = {"2y": 800, "1y": 430, "6mo": 220, "3mo": 120}[range_]
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=days)
+    url = STOOQ_URL.format(symbol=symbol.upper(), d1=start.strftime("%Y%m%d"), d2=end.strftime("%Y%m%d"))
+    try:
+        r = SESSION.get(url, timeout=timeout)
+        r.raise_for_status()
+        text = r.text
+        if not text or text.startswith("No data"):
+            return None
+        rows = []
+        for row in csv.DictReader(io.StringIO(text)):
+            try:
+                if not row.get("Date") or row.get("Close") in (None, "") or row.get("Volume") in (None, ""):
+                    continue
+                rows.append((row["Date"], float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"]), float(row["Volume"])))
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            return None
+        rows.sort(key=lambda x: x[0])
+        log.info("%s historical fallback：Stooq %d bars", symbol, len(rows))
+        return {"dates": [r[0] for r in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s Stooq fallback 失敗：%s", symbol, e)
+        return None
 
 
 def _rows_from_result(res: dict) -> list[tuple]:
@@ -118,17 +154,28 @@ def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BAR
     cached = _load_cache(symbol, range_, min_bars)
     if cached:
         return cached
-    res = _chart(symbol, range_)
-    if not res:
-        log.info("%s 無歷史數據", symbol)
-        return None
-    rows = _rows_from_result(res)
-    if len(rows) < min_bars:
-        log.info("%s 數據不足（%d bars，要求 %d）", symbol, len(rows), min_bars)
-        return None
-    data = {"dates": [d2s(t) for t, *_ in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
-    _save_cache(symbol, range_, data)
-    return data
+    try:
+        res = _chart(symbol, range_)
+    except YahooRateLimitError:
+        log.warning("%s Yahoo 429；改用 Stooq historical fallback", symbol)
+        fallback = _stooq(symbol, range_)
+        if fallback and len(fallback["dates"]) >= min_bars:
+            _save_cache(symbol, range_, fallback, "stooq")
+            return fallback
+        raise
+    if res:
+        rows = _rows_from_result(res)
+        if len(rows) >= min_bars:
+            data = {"dates": [d2s(t) for t, *_ in rows], "open": [r[1] for r in rows], "high": [r[2] for r in rows], "low": [r[3] for r in rows], "close": [r[4] for r in rows], "volume": [r[5] for r in rows]}
+            _save_cache(symbol, range_, data, "yahoo")
+            return data
+        log.info("%s Yahoo 數據不足（%d bars，要求 %d），改用 Stooq", symbol, len(rows), min_bars)
+    fallback = _stooq(symbol, range_)
+    if fallback and len(fallback["dates"]) >= min_bars:
+        _save_cache(symbol, range_, fallback, "stooq")
+        return fallback
+    log.info("%s 無足夠歷史數據", symbol)
+    return None
 
 
 def d2s(ts: int) -> str:
@@ -169,14 +216,14 @@ def average_volume(data: dict, bars: int = 63) -> float:
 
 
 def fetch_many(symbols: list[str], pause: float = 0.75, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> dict[str, dict]:
-    """逐隻下載歷史日線；成功結果即時寫入本地 cache；Yahoo 429 時停止 batch，方便稍後 resume。"""
+    """逐隻下載歷史日線；Yahoo 429 時自動 fallback 至 Stooq；成功結果即時 cache。"""
     out = {}
     total = len(symbols)
     for i, sym in enumerate(symbols):
         try:
             data = fetch_daily(sym, range_, min_bars=min_bars)
         except YahooRateLimitError:
-            log.error("Yahoo 連續 429，停止 historical batch（%d/%d）；稍後重跑會自動跳過已 cache 數據。", i, total)
+            log.error("%s Yahoo + Stooq historical 都未能取得數據；停止 batch（%d/%d）。", sym, i, total)
             break
         if data:
             out[sym] = data
