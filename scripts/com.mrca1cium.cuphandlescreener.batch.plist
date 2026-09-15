@@ -14,9 +14,10 @@
     <key>WorkingDirectory</key>
     <string>/Users/calcium/cup-handle-screener</string>
 
-    <!-- UK local time: 01:00 and 13:00 every day. launchd also runs a missed
-         calendar event after the Mac comes back up, so a shutdown/sleep period
-         does not permanently skip the batch. -->
+    <!-- Run at 01:00 and 13:00 in the Mac's local timezone. RunAtLoad is also
+         enabled; the wrapper keeps a persistent scheduled-slot marker so a
+         full shutdown can catch up once after startup without duplicating a
+         slot that already ran. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>
@@ -38,8 +39,10 @@
     <key>StandardErrorPath</key>
     <string>/Users/calcium/cup-handle-screener/.cache/logs/launchd.err.log</string>
 
+    <!-- Startup trigger for catch-up after a full shutdown. The wrapper
+         prevents duplicate execution of an already completed slot. -->
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
     <!-- Avoid overlapping batches if one happens to run long. -->
     <key>ThrottleInterval</key>
