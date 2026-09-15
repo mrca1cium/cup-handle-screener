@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mrca1cium.cuphandlescreener.batch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/calcium/cup-handle-screener/scripts/run_stashgamma_batch.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/calcium/cup-handle-screener</string>
+
+    <!-- UK local time: 01:00 and 13:00 every day. launchd also runs a missed
+         calendar event after the Mac comes back up, so a shutdown/sleep period
+         does not permanently skip the batch. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>1</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>13</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/calcium/cup-handle-screener/.cache/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/calcium/cup-handle-screener/.cache/logs/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Avoid overlapping batches if one happens to run long. -->
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+</dict>
+</plist>
