@@ -24,6 +24,11 @@ CACHE_DIR = os.path.join(ROOT, ".cache", "market")
 LOG_DIR = os.path.join(ROOT, ".cache", "logs")
 STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
+# A symbol with fewer than 252 daily bars is normally a newly listed / short
+# history security. Do not spend API quota retrying it every day. Recheck it
+# after this many days in case its history has grown enough.
+INSUFFICIENT_RETRY_DAYS = 30
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -61,19 +66,40 @@ def candidate_symbols() -> List[str]:
     return [r["symbol"] for r in cheap]
 
 
-def save_state(**kwargs):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    old = {}
+def load_state() -> dict:
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
-            old = json.load(f)
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
     except Exception:
-        pass
+        return {}
+
+
+def save_state(**kwargs):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    old = load_state()
     old.update(kwargs)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(old, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_PATH)
+
+
+def insufficient_symbols(state: dict, now: float) -> set:
+    """Return symbols temporarily skipped after an insufficient-history result."""
+    result = set()
+    raw = state.get("insufficient_data") or {}
+    if not isinstance(raw, dict):
+        return result
+    retry_after = INSUFFICIENT_RETRY_DAYS * 86400
+    for symbol, info in raw.items():
+        try:
+            checked_at = float(info.get("checked_at", 0))
+            if now - checked_at < retry_after:
+                result.add(str(symbol).upper())
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return result
 
 
 def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
@@ -83,13 +109,20 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     os.makedirs(LOG_DIR, exist_ok=True)
     symbols = candidate_symbols()
     unavailable = data_mod._load_unavailable()
+    state = load_state()
     now = time.time()
     stale_seconds = stale_days * 86400
+    insufficient = insufficient_symbols(state, now)
 
     # Priority: never-downloaded symbols first, then caches older than stale_days.
     pending = []
+    skipped_insufficient = 0
     for symbol in symbols:
-        if symbol.upper() in unavailable:
+        upper = symbol.upper()
+        if upper in unavailable:
+            continue
+        if upper in insufficient:
+            skipped_insufficient += 1
             continue
         meta = load_cache_meta(symbol)
         if meta is None:
@@ -103,12 +136,16 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     selected = [symbol for _, symbol in pending[:max_requests]]
 
     log.info(
-        "未完成/需 refresh=%d；本批最多=%d；實際處理=%d",
-        len(pending), max_requests, len(selected),
+        "未完成/需 refresh=%d；insufficient data 暫時跳過=%d；本批最多=%d；實際處理=%d",
+        len(pending),
+        skipped_insufficient,
+        max_requests,
+        len(selected),
     )
 
     success = 0
     unavailable_count = 0
+    insufficient_count = 0
     rate_limited = False
     failed = 0
 
@@ -116,9 +153,38 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         meta = load_cache_meta(symbol)
         refresh = meta is not None
         try:
-            data_mod.fetch_daily(symbol, "2y", refresh=refresh)
-            success += 1
-            log.info("[%d/%d] %s OK%s", index, len(selected), symbol, " (refresh)" if refresh else "")
+            result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
+            if result is None:
+                insufficient_count += 1
+                state = load_state()
+                insufficient_map = state.get("insufficient_data") or {}
+                insufficient_map[symbol.upper()] = {
+                    "checked_at": time.time(),
+                    "retry_after_days": INSUFFICIENT_RETRY_DAYS,
+                }
+                save_state(insufficient_data=insufficient_map)
+                log.info(
+                    "[%d/%d] %s INSUFFICIENT_DATA：未取得足夠 %d bars，30 日後再檢查",
+                    index,
+                    len(selected),
+                    symbol,
+                    data_mod.DEFAULT_MIN_BARS,
+                )
+            else:
+                success += 1
+                # A previously insufficient symbol may become valid after a later retry.
+                state = load_state()
+                insufficient_map = state.get("insufficient_data") or {}
+                if symbol.upper() in insufficient_map:
+                    insufficient_map.pop(symbol.upper(), None)
+                    save_state(insufficient_data=insufficient_map)
+                log.info(
+                    "[%d/%d] %s OK%s",
+                    index,
+                    len(selected),
+                    symbol,
+                    " (refresh)" if refresh else "",
+                )
         except data_mod.StashGammaUnavailableError as exc:
             unavailable_count += 1
             data_mod._mark_unavailable(symbol)
@@ -141,15 +207,26 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         last_run_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         requested=len(selected),
         success=success,
+        insufficient_data=insufficient_count,
         unavailable=unavailable_count,
         failed=failed,
         rate_limited=rate_limited,
-        remaining_pending=max(0, len(pending) - len(selected) if not rate_limited else len(pending) - success - unavailable_count - failed),
+        remaining_pending=max(
+            0,
+            len(pending) - len(selected)
+            if not rate_limited
+            else len(pending) - success - unavailable_count - failed - insufficient_count,
+        ),
     )
 
     log.info(
-        "Batch 完成：requested=%d success=%d unavailable=%d failed=%d rate_limited=%s",
-        len(selected), success, unavailable_count, failed, rate_limited,
+        "Batch 完成：requested=%d success=%d insufficient=%d unavailable=%d failed=%d rate_limited=%s",
+        len(selected),
+        success,
+        insufficient_count,
+        unavailable_count,
+        failed,
+        rate_limited,
     )
     return 0 if not rate_limited else 2
 
