@@ -24,9 +24,6 @@ CACHE_DIR = os.path.join(ROOT, ".cache", "market")
 LOG_DIR = os.path.join(ROOT, ".cache", "logs")
 STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
-# A symbol with fewer than 252 daily bars is normally a newly listed / short
-# history security. Do not spend API quota retrying it every day. Recheck it
-# after this many days in case its history has grown enough.
 INSUFFICIENT_RETRY_DAYS = 30
 
 logging.basicConfig(
@@ -85,12 +82,24 @@ def save_state(**kwargs):
     os.replace(tmp, STATE_PATH)
 
 
+def get_insufficient_map(state: dict) -> dict:
+    """Read the persistent symbol map, tolerating the old integer summary field."""
+    raw = state.get("insufficient_symbols")
+    if isinstance(raw, dict):
+        return raw
+
+    # Backward compatibility with the first version, which accidentally used
+    # the same key for both the symbol map and the per-run integer count.
+    legacy = state.get("insufficient_data")
+    if isinstance(legacy, dict):
+        return legacy
+    return {}
+
+
 def insufficient_symbols(state: dict, now: float) -> set:
     """Return symbols temporarily skipped after an insufficient-history result."""
     result = set()
-    raw = state.get("insufficient_data") or {}
-    if not isinstance(raw, dict):
-        return result
+    raw = get_insufficient_map(state)
     retry_after = INSUFFICIENT_RETRY_DAYS * 86400
     for symbol, info in raw.items():
         try:
@@ -114,7 +123,6 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     stale_seconds = stale_days * 86400
     insufficient = insufficient_symbols(state, now)
 
-    # Priority: never-downloaded symbols first, then caches older than stale_days.
     pending = []
     skipped_insufficient = 0
     for symbol in symbols:
@@ -157,12 +165,12 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
             if result is None:
                 insufficient_count += 1
                 state = load_state()
-                insufficient_map = state.get("insufficient_data") or {}
+                insufficient_map = get_insufficient_map(state)
                 insufficient_map[symbol.upper()] = {
                     "checked_at": time.time(),
                     "retry_after_days": INSUFFICIENT_RETRY_DAYS,
                 }
-                save_state(insufficient_data=insufficient_map)
+                save_state(insufficient_symbols=insufficient_map)
                 log.info(
                     "[%d/%d] %s INSUFFICIENT_DATA：未取得足夠 %d bars，30 日後再檢查",
                     index,
@@ -172,12 +180,11 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
                 )
             else:
                 success += 1
-                # A previously insufficient symbol may become valid after a later retry.
                 state = load_state()
-                insufficient_map = state.get("insufficient_data") or {}
+                insufficient_map = get_insufficient_map(state)
                 if symbol.upper() in insufficient_map:
                     insufficient_map.pop(symbol.upper(), None)
-                    save_state(insufficient_data=insufficient_map)
+                    save_state(insufficient_symbols=insufficient_map)
                 log.info(
                     "[%d/%d] %s OK%s",
                     index,
@@ -202,12 +209,19 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         if index < len(selected):
             time.sleep(pause)
 
+    # Keep the persistent symbol map under a dedicated key.  The old
+    # implementation wrote the integer count to `insufficient_data`, which
+    # corrupted the map and caused `'int' object does not support item assignment`
+    # / `'int' object is not iterable` on the next run.
+    state = load_state()
+    persistent_insufficient = get_insufficient_map(state)
     save_state(
+        insufficient_symbols=persistent_insufficient,
         last_run_at=time.time(),
         last_run_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         requested=len(selected),
         success=success,
-        insufficient_data=insufficient_count,
+        insufficient_count=insufficient_count,
         unavailable=unavailable_count,
         failed=failed,
         rate_limited=rate_limited,
