@@ -24,12 +24,15 @@ CHART_HOSTS = [
 STASHGAMMA_URL = "https://www.stashgamma.com/api/dataapi/v1/eod/{symbol}"
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
-CACHE_MAX_AGE_SECONDS = 3 * 24 * 3600
+# StashGamma documents a 300/hour limit. Keep a safety margin so one run
+# does not deliberately consume the whole hourly allowance.
+DEFAULT_MAX_REQUESTS = 280
 CACHE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     ".cache",
     "market",
 )
+UNAVAILABLE_PATH = os.path.join(CACHE_DIR, "stashgamma_unavailable.json")
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
@@ -42,16 +45,30 @@ class StashGammaError(RuntimeError):
     """StashGamma historical-data request failed."""
 
 
+class StashGammaRateLimitError(StashGammaError):
+    """StashGamma returned 429; the caller should stop the current batch."""
+
+
+class StashGammaUnavailableError(StashGammaError):
+    """StashGamma has no usable data for this symbol (for example HTTP 404)."""
+
+
 def _backoff(attempt: int, base: float, cap: float) -> float:
     return min(cap, base * (2 ** attempt)) + random.uniform(0, 1.5)
 
 
-def _cache_path(symbol: str, range_: str) -> str:
+def _cache_path(symbol: str, range_: str = "2y") -> str:
     safe = symbol.replace("/", "_").replace("\\", "_")
     return os.path.join(CACHE_DIR, "%s_%s.json" % (safe, range_))
 
 
 def _load_cache(symbol: str, range_: str, min_bars: int) -> Optional[dict]:
+    """Load a historical cache without expiring it automatically.
+
+    Weekly refresh is handled explicitly by fetch_many(refresh=True). This is
+    important because the screener should not re-download 2 years of history
+    simply because a cache is older than a few days.
+    """
     if range_ != "2y":
         return None
     path = _cache_path(symbol, range_)
@@ -60,14 +77,14 @@ def _load_cache(symbol: str, range_: str, min_bars: int) -> Optional[dict]:
             return None
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
-        fetched_at = float(payload.get("fetched_at", 0))
         data = payload.get("data")
         if not data or len(data.get("dates", [])) < min_bars:
             return None
-        age = time.time() - fetched_at
-        if age > CACHE_MAX_AGE_SECONDS:
-            return None
-        log.info("%s 使用本地 2y cache（%.1f 小時前，來源=%s）", symbol, age / 3600, payload.get("source", "unknown"))
+        log.info(
+            "%s 使用本地 2y cache（來源=%s）",
+            symbol,
+            payload.get("source", "unknown"),
+        )
         return data
     except Exception as e:  # noqa: BLE001
         log.warning("%s cache 讀取失敗：%s", symbol, e)
@@ -95,6 +112,35 @@ def _save_cache(symbol: str, range_: str, data: dict, source: str) -> None:
         os.replace(tmp, path)
     except Exception as e:  # noqa: BLE001
         log.warning("%s cache 寫入失敗：%s", symbol, e)
+
+
+def _load_unavailable() -> set:
+    try:
+        if not os.path.exists(UNAVAILABLE_PATH):
+            return set()
+        with open(UNAVAILABLE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, list):
+            return set(str(x).upper() for x in payload)
+        if isinstance(payload, dict):
+            return set(str(x).upper() for x in payload.get("symbols", []))
+    except Exception as e:  # noqa: BLE001
+        log.warning("StashGamma unavailable list 讀取失敗：%s", e)
+    return set()
+
+
+def _mark_unavailable(symbol: str) -> None:
+    """Remember permanent/unavailable symbols so they do not waste API calls."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        symbols = _load_unavailable()
+        symbols.add(symbol.upper())
+        tmp = UNAVAILABLE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(symbols), f, ensure_ascii=False, indent=2)
+        os.replace(tmp, UNAVAILABLE_PATH)
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s unavailable list 寫入失敗：%s", symbol, e)
 
 
 def _chart(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
@@ -183,11 +229,18 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
         raise StashGammaError("%s request 失敗：%s" % (symbol, e))
 
     if r.status_code == 429:
-        raise StashGammaError("%s StashGamma 429 rate limit" % symbol)
+        raise StashGammaRateLimitError("%s StashGamma 429 rate limit" % symbol)
+    if r.status_code == 404:
+        raise StashGammaUnavailableError("%s StashGamma HTTP 404" % symbol)
     if r.status_code in (401, 403):
-        raise StashGammaError("%s StashGamma API key 無效或未獲授權（HTTP %d）" % (symbol, r.status_code))
+        raise StashGammaError(
+            "%s StashGamma API key 無效或未獲授權（HTTP %d）"
+            % (symbol, r.status_code)
+        )
     if r.status_code != 200:
-        raise StashGammaError("%s StashGamma HTTP %d: %s" % (symbol, r.status_code, r.text[:300]))
+        raise StashGammaError(
+            "%s StashGamma HTTP %d: %s" % (symbol, r.status_code, r.text[:300])
+        )
 
     try:
         payload = r.json()
@@ -196,12 +249,15 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
 
     bars = payload.get("bars", []) if isinstance(payload, dict) else []
     if not isinstance(bars, list) or not bars:
-        return None
+        raise StashGammaUnavailableError("%s StashGamma 無 bars" % symbol)
 
     rows = []
     for bar in bars:
         try:
-            if not all(bar.get(k) is not None for k in ("date", "open", "high", "low", "close", "volume")):
+            if not all(
+                bar.get(k) is not None
+                for k in ("date", "open", "high", "low", "close", "volume")
+            ):
                 continue
             rows.append(
                 (
@@ -217,7 +273,7 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
             continue
 
     if not rows:
-        return None
+        raise StashGammaUnavailableError("%s StashGamma 無有效 bars" % symbol)
 
     rows.sort(key=lambda x: x[0])
     return {
@@ -227,6 +283,44 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
         "low": [r[3] for r in rows],
         "close": [r[4] for r in rows],
         "volume": [r[5] for r in rows],
+    }
+
+
+def _merge_daily(old: dict, new: dict) -> dict:
+    """Merge refreshed bars into the existing 2y cache by date."""
+    rows = {}
+    for i, date in enumerate(old.get("dates", [])):
+        try:
+            rows[str(date)] = (
+                float(old["open"][i]),
+                float(old["high"][i]),
+                float(old["low"][i]),
+                float(old["close"][i]),
+                float(old["volume"][i]),
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+
+    for i, date in enumerate(new.get("dates", [])):
+        try:
+            rows[str(date)] = (
+                float(new["open"][i]),
+                float(new["high"][i]),
+                float(new["low"][i]),
+                float(new["close"][i]),
+                float(new["volume"][i]),
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+
+    dates = sorted(rows.keys())[-550:]
+    return {
+        "dates": dates,
+        "open": [rows[d][0] for d in dates],
+        "high": [rows[d][1] for d in dates],
+        "low": [rows[d][2] for d in dates],
+        "close": [rows[d][3] for d in dates],
+        "volume": [rows[d][4] for d in dates],
     }
 
 
@@ -242,11 +336,34 @@ def _rows_from_result(res: dict) -> list[tuple]:
     ]
 
 
-def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BARS) -> Optional[dict]:
-    """Fetch historical daily OHLCV from StashGamma, using the existing local cache."""
+def fetch_daily(
+    symbol: str,
+    range_: str = "2y",
+    min_bars: int = DEFAULT_MIN_BARS,
+    refresh: bool = False,
+) -> Optional[dict]:
+    """Fetch historical daily OHLCV with persistent cache.
+
+    Initial load: download 2 years once.
+    Weekly refresh: download only the recent 3 months and merge it into the
+    existing 2-year cache, avoiding another full 2-year download.
+    """
+    symbol = symbol.upper()
     cached = _load_cache(symbol, range_, min_bars)
-    if cached:
+    if cached and not refresh:
         return cached
+
+    if symbol in _load_unavailable():
+        log.info("%s 已列入 StashGamma unavailable list，跳過 API", symbol)
+        return None
+
+    if refresh and cached and range_ == "2y":
+        data = _stashgamma(symbol, "3mo")
+        merged = _merge_daily(cached, data) if data else cached
+        if len(merged["dates"]) >= min_bars:
+            _save_cache(symbol, "2y", merged, "stashgamma")
+            return merged
+        return None
 
     data = _stashgamma(symbol, range_)
     if data and len(data["dates"]) >= min_bars:
@@ -260,8 +377,6 @@ def fetch_daily(symbol: str, range_: str = "2y", min_bars: int = DEFAULT_MIN_BAR
             len(data["dates"]),
             min_bars,
         )
-    else:
-        log.info("%s StashGamma 無歷史數據", symbol)
     return None
 
 
@@ -346,30 +461,98 @@ def fetch_many(
     pause: float = 0.75,
     range_: str = "2y",
     min_bars: int = DEFAULT_MIN_BARS,
+    refresh: bool = False,
+    max_requests: int = DEFAULT_MAX_REQUESTS,
 ) -> dict[str, dict]:
-    """逐隻下載歷史日線；使用 StashGamma；單隻失敗會跳過並繼續。"""
+    """Fetch many symbols with cache-first and rate-limit-aware behavior.
+
+    - Existing 2y cache is reused unless refresh=True.
+    - refresh=True fetches only 3 months and merges it into the 2y cache.
+    - HTTP 404 is permanently recorded in the unavailable list.
+    - HTTP 429 stops the current batch immediately instead of hammering the API.
+    - max_requests defaults to 280, leaving a safety margin below 300/hour.
+    """
     out = {}
+    unavailable = _load_unavailable()
     total = len(symbols)
+    requests_made = 0
+    cache_hits = 0
+
     for i, sym in enumerate(symbols):
-        try:
-            data = fetch_daily(sym, range_, min_bars=min_bars)
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.error(
-                "%s historical 失敗：%s；跳過並繼續（%d/%d）",
-                sym,
-                e,
+        sym = sym.upper()
+        if sym in unavailable:
+            log.info("%s 已知 unavailable，跳過（%d/%d）", sym, i + 1, total)
+            continue
+
+        # A cache hit does not consume an API request.
+        cached = _load_cache(sym, range_, min_bars)
+        if cached and not refresh:
+            out[sym] = cached
+            cache_hits += 1
+        else:
+            if requests_made >= max_requests:
+                log.warning(
+                    "已達本批安全 API request 上限 %d；停止本批。下一批再繼續。",
+                    max_requests,
+                )
+                break
+            try:
+                data = fetch_daily(
+                    sym,
+                    range_,
+                    min_bars=min_bars,
+                    refresh=refresh,
+                )
+                requests_made += 1
+            except StashGammaUnavailableError as e:
+                requests_made += 1
+                _mark_unavailable(sym)
+                unavailable.add(sym)
+                log.warning("%s unavailable，加入黑名單：%s", sym, e)
+                data = None
+            except StashGammaRateLimitError as e:
+                log.error(
+                    "%s 收到 429：立即停止本批，避免繼續浪費 API quota：%s",
+                    sym,
+                    e,
+                )
+                break
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:  # noqa: BLE001
+                requests_made += 1
+                log.error(
+                    "%s historical 失敗：%s；跳過並繼續（%d/%d）",
+                    sym,
+                    e,
+                    i + 1,
+                    total,
+                )
+                data = None
+
+            if data:
+                out[sym] = data
+
+        if (i + 1) % 50 == 0 or i + 1 == total:
+            log.info(
+                "歷史數據：%d/%d，成功 %d，cache %d，API requests %d/%d",
                 i + 1,
                 total,
+                len(out),
+                cache_hits,
+                requests_made,
+                max_requests,
             )
-            data = None
-        if data:
-            out[sym] = data
-        if (i + 1) % 50 == 0 or i + 1 == total:
-            log.info("歷史數據：%d/%d，成功 %d", i + 1, total, len(out))
-        if i + 1 < total:
+        if i + 1 < total and requests_made < max_requests:
             time.sleep(pause)
+
+    log.info(
+        "歷史 batch 完成：input=%d success=%d cache_hits=%d API_requests=%d",
+        total,
+        len(out),
+        cache_hits,
+        requests_made,
+    )
     return out
 
 
