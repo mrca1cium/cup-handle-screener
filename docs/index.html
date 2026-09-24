@@ -3,215 +3,232 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>美股杯柄形態篩選器 | Cup & Handle Screener</title>
+<meta name="theme-color" content="#07111f">
+<title>美股杯柄形態篩選器 | US Cup & Handle Screener</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-  body { font-family: -apple-system, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif; }
-  .grade-match { background:#dcfce7; color:#166534; }
-  .grade-watch { background:#fef9c3; color:#854d0e; }
-  details > summary { list-style:none; cursor:pointer; }
-  details > summary::-webkit-details-marker { display:none; }
+  :root{--bg:#07111f;--panel:#0d1828;--panel2:#101e31;--line:#1d2d43;--muted:#8ea0b8;--text:#e7eef8;--green:#35d399;--yellow:#f5c451;--red:#fb7185;--blue:#5ea7ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(circle at 15% -10%,#18345a 0,#07111f 38%),#07111f;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif}
+  .shell{max-width:1440px;margin:auto;padding:22px}
+  .glass{background:rgba(13,24,40,.88);border:1px solid var(--line);box-shadow:0 18px 55px rgba(0,0,0,.22);backdrop-filter:blur(12px)}
+  .muted{color:var(--muted)}
+  .stat{background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.018));border:1px solid var(--line)}
+  .chip{border:1px solid var(--line);background:#0b1727}
+  .match{border-color:rgba(53,211,153,.35);box-shadow:0 0 0 1px rgba(53,211,153,.04),0 20px 55px rgba(0,0,0,.2)}
+  .watch{border-color:rgba(245,196,81,.28)}
+  .btn{border:1px solid var(--line);background:#0c192a;color:#cbd8e8;transition:.15s}
+  .btn:hover{border-color:#38506f;background:#122238;color:#fff}
+  .btn.active{background:#dcecff;color:#081423;border-color:#dcecff}
+  .metric{background:#0a1626;border:1px solid #172940}
+  .bar{height:6px;border-radius:999px;background:#17283d;overflow:hidden}
+  .bar>span{display:block;height:100%;border-radius:999px}
+  details>summary{list-style:none;cursor:pointer}
+  details>summary::-webkit-details-marker{display:none}
+  details[open] .chev{transform:rotate(180deg)}
+  .chev{transition:.15s}
+  .gridline{border-color:var(--line)}
+  .table-head{color:#7f92ab;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  .index-up{color:var(--green);background:rgba(53,211,153,.08);border-color:rgba(53,211,153,.2)}
+  .index-warn{color:var(--yellow);background:rgba(245,196,81,.08);border-color:rgba(245,196,81,.2)}
+  .index-bad{color:var(--red);background:rgba(251,113,133,.08);border-color:rgba(251,113,133,.2)}
+  .positive{color:var(--green)} .negative{color:var(--red)}
+  .score-ring{background:conic-gradient(var(--green) calc(var(--score)*1%),#20334b 0)}
+  @media(max-width:900px){.shell{padding:12px}.hero-grid{grid-template-columns:1fr}.metric-row{grid-template-columns:repeat(2,minmax(0,1fr))}.desktop-only{display:none}.card-top{align-items:flex-start}.card-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
-<body class="bg-slate-100 text-slate-800">
-<div class="max-w-6xl mx-auto p-4">
+<body>
+<div class="shell">
+  <header class="glass rounded-3xl p-6 md:p-7 mb-5">
+    <div class="hero-grid grid md:grid-cols-[1fr_auto] gap-6 items-start">
+      <div>
+        <div class="flex flex-wrap items-center gap-2 mb-3">
+          <span class="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-400/10 text-emerald-300 border border-emerald-400/20">LIVE SCREENER</span>
+          <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Stage 2</span>
+          <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Cup & Handle</span>
+          <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">VCP</span>
+        </div>
+        <h1 class="text-3xl md:text-4xl font-black tracking-tight">美股杯柄形態篩選器</h1>
+        <p class="muted mt-2 max-w-3xl">由 Stage 2 趨勢 → Cup & Handle → VCP → 量縮逐層篩選，集中顯示接近突破位的候選股。</p>
+        <div class="flex flex-wrap gap-2 mt-5 text-xs muted">
+          <span>最後更新 <b id="gen-date" class="text-slate-200">—</b></span>
+          <span>·</span><span>資料由 backend 產生</span><span>·</span><span>僅供研究參考</span>
+        </div>
+      </div>
+      <div class="flex gap-3 md:justify-end">
+        <button id="copy-btn" class="btn rounded-xl px-4 py-2.5 text-sm font-semibold">📋 Copy MATCH tickers</button>
+        <span id="copy-msg" class="self-center text-xs positive hidden">已複製</span>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
+      <div class="stat rounded-2xl p-4"><div class="muted text-xs">Stocks scanned</div><div id="total" class="text-2xl font-black mt-1">—</div></div>
+      <div class="stat rounded-2xl p-4"><div class="muted text-xs">Stage 2 pass</div><div id="stage2-count" class="text-2xl font-black mt-1">—</div></div>
+      <div class="stat rounded-2xl p-4"><div class="muted text-xs">MATCH</div><div id="match-count" class="text-2xl font-black mt-1 text-emerald-300">—</div></div>
+      <div class="stat rounded-2xl p-4"><div class="muted text-xs">WATCH</div><div id="watch-count" class="text-2xl font-black mt-1 text-amber-300">—</div></div>
+    </div>
+  </header>
 
-<header class="mb-6">
-  <h1 class="text-2xl font-bold">🍵 美股杯柄形態篩選器</h1>
-  <p class="text-sm text-slate-500">Stage 2 趨勢篩選 + 杯柄 / VCP / 量縮偵測（Minervini 系統）·
-    資料來源：Yahoo Finance · 更新日期：<span id="gen-date">—</span> · 已掃描 <span id="total">—</span> 隻</p>
-</header>
+  <section class="glass rounded-3xl p-5 mb-5">
+    <div class="flex items-center justify-between gap-3 mb-4">
+      <div><h2 class="font-bold text-lg">市場雷達</h2><p class="muted text-xs mt-1">大市回調程度 + 板塊相對強弱</p></div>
+      <span id="market-date" class="text-xs muted"></span>
+    </div>
+    <div id="indices" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5"></div>
+    <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Sector relative strength</h3><span class="text-xs muted">近 1 個月 vs S&P 500</span></div>
+    <div id="sectors" class="space-y-2"></div>
+    <div id="sector-empty" class="hidden text-xs muted py-3">目前沒有可顯示的板塊數據。</div>
+  </section>
 
-<!-- Step 1 大市狀態 -->
-<section id="market" class="bg-white rounded-xl shadow p-4 mb-6">
-  <h2 class="font-semibold mb-3">📈 大市狀態（Step 1 照鏡）</h2>
-  <div id="indices" class="flex flex-wrap gap-3 mb-4"></div>
-  <h3 class="text-sm font-semibold text-slate-600 mb-2">板塊相對強弱（近 1 個月 vs S&P 500）</h3>
-  <div id="sectors" class="space-y-1"></div>
-  <p class="text-xs text-slate-400 mt-3">下面名單已經按呢個板塊強弱加分：🔥 強勢板塊排前，弱勢板塊照顯示但排後（唔會剔除）——強股都可以嚟自中性或冇對應 GICS 嘅主題板塊（例如 GLD／XME）。</p>
-</section>
+  <section class="glass rounded-3xl p-4 mb-5">
+    <div class="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
+      <div class="flex flex-wrap gap-2">
+        <button class="btn active rounded-xl px-3 py-2 text-xs font-semibold filter active" data-filter="match">MATCH <span id="match-pill">0</span></button>
+        <button class="btn rounded-xl px-3 py-2 text-xs font-semibold filter" data-filter="watch">WATCH <span id="watch-pill">0</span></button>
+        <button class="btn rounded-xl px-3 py-2 text-xs font-semibold filter" data-filter="all">ALL</button>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <label class="text-xs muted flex items-center gap-2">排序
+          <select id="sort" class="btn rounded-xl px-3 py-2 outline-none">
+            <option value="rs">RS 高 → 低</option>
+            <option value="pivot">距 Pivot 近 → 遠</option>
+            <option value="vcp">VCP 低 → 高</option>
+            <option value="volume">成交量 高 → 低</option>
+            <option value="depth">杯深度 低 → 高</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </section>
 
-<!-- 操作列 -->
-<section class="flex items-center gap-3 mb-3">
-  <button id="copy-btn" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">📋 複製全部代號（貼 TradingView 設 Alert）</button>
-  <label class="text-sm"><input type="checkbox" id="show-watch" class="mr-1">顯示觀察名單</label>
-  <span id="copy-msg" class="text-green-600 text-sm hidden">已複製！</span>
-</section>
+  <main>
+    <div class="flex items-end justify-between mb-3 px-1">
+      <div><h2 id="section-title" class="text-xl font-black">MATCH · 接近完整形態</h2><p id="section-subtitle" class="muted text-xs mt-1">Stage 2 + Cup & Handle 條件大致齊全</p></div>
+      <span id="shown-count" class="text-xs muted"></span>
+    </div>
+    <div id="cards" class="space-y-3"></div>
+  </main>
 
-<!-- 主表 -->
-<section id="table-wrap" class="space-y-3"></section>
-
-<footer class="text-xs text-slate-400 mt-8 pb-8">
-  本工具只提供形態篩選參考，唔構成投資建議。突破買入前請按手冊 Step 3 肉眼審查形態美觀度，並嚴守 8% 硬止蝕。
-</footer>
+  <footer class="muted text-xs py-8 text-center">
+    本工具只提供形態篩選參考，不構成投資建議。突破前仍應按策略肉眼審查形態、成交量及市場環境，並自行管理風險。
+  </footer>
 </div>
 
 <script>
-const CHECK_LABELS = {
-  "1_price_above_150_200": "① 股價 > 150/200MA",
-  "2_ma150_above_200": "② 150MA > 200MA",
-  "3_ma200_rising": "③ 200MA 向上",
-  "4_ma50_above_150_200": "④ 50MA > 150/200MA",
-  "5_price_above_50": "⑤ 股價 > 50MA",
-  "6_within_25pct_of_52w_high": "⑥ 距52週高 ≤25%",
-  "7_at_least_25pct_above_52w_low": "⑦ 高於52週低 ≥25%",
-  "8_rs_above_70": "⑧ RS評級 ≥70",
-  "cup_depth_ok": "杯深度 12–40%",
-  "cup_length_ok": "杯長 1–6個月",
-  "handle_length_ok": "柄長 1週–2個月",
-  "handle_shorter_than_cup": "柄短於杯身",
-  "handle_near_rim": "柄部貼近杯口",
-  "vcp_range_le_10": "VCP 波幅 ≤10%",
-  "higher_lows": "一底高過一底",
-  "no_lower_lows": "無一底低過一底",
-  "volume_dry_up": "量縮 VDU",
-  "not_too_sharp": "非急拉突破",
+const CHECK_LABELS={
+"1_price_above_150_200":"股價 > 150/200MA","2_ma150_above_200":"150MA > 200MA","3_ma200_rising":"200MA 向上","4_ma50_above_150_200":"50MA > 150/200MA","5_price_above_50":"股價 > 50MA","6_within_25pct_of_52w_high":"距52週高 ≤25%","7_at_least_25pct_above_52w_low":"高於52週低 ≥25%","8_rs_above_70":"RS ≥70",
+"cup_depth_ok":"杯深度 12–40%","cup_length_ok":"杯長 1–6 個月","handle_length_ok":"柄長 1週–2個月","handle_shorter_than_cup":"柄短於杯身","handle_near_rim":"柄部貼近杯口","vcp_range_le_10":"VCP 波幅 ≤10%","higher_lows":"一底高過一底","no_lower_lows":"無一底低過一底","volume_dry_up":"量縮 VDU","not_too_sharp":"非急拉突破"
 };
-const PAT_KEYS = ["cup_depth_ok","cup_length_ok","handle_length_ok","handle_shorter_than_cup","handle_near_rim","vcp_range_le_10","higher_lows","no_lower_lows","volume_dry_up","not_too_sharp"];
+let results={},charts={},filterMode="match";
 
-let results, charts;
+const fmt=n=>n==null?"—":Number(n).toLocaleString("en-US");
+const pct=n=>n==null?"—":(Number(n)>0?"+":"")+Number(n).toFixed(1)+"%";
+const allEntries=()=>[...(results.results||[]),...(results.watchlist||[])];
 
-async function init() {
-  [results, charts] = await Promise.all([
-    fetch('data/results.json').then(r => r.json()),
-    fetch('data/charts.json').then(r => r.json()),
-  ]);
-  document.getElementById('gen-date').textContent = results.generated_at || '—';
-  document.getElementById('total').textContent = results.total_scanned;
-  renderMarket(results.market);
-  if (!(results.results||[]).length) document.getElementById('show-watch').checked = true;
-  renderTable();
-  document.getElementById('show-watch').addEventListener('change', renderTable);
-  document.getElementById('copy-btn').addEventListener('click', copyAll);
+async function init(){
+ [results,charts]=await Promise.all([
+  fetch("data/results.json").then(r=>r.json()),
+  fetch("data/charts.json").then(r=>r.json())
+ ]);
+ document.getElementById("gen-date").textContent=results.generated_at||"—";
+ document.getElementById("market-date").textContent=results.market?.date||"";
+ document.getElementById("total").textContent=fmt(results.total_scanned);
+ const u=results.universe_stats||{};
+ document.getElementById("stage2-count").textContent=fmt(u.stage2_pass);
+ document.getElementById("match-count").textContent=(results.results||[]).length;
+ document.getElementById("watch-count").textContent=(results.watchlist||[]).length;
+ document.getElementById("match-pill").textContent=(results.results||[]).length;
+ document.getElementById("watch-pill").textContent=(results.watchlist||[]).length;
+ renderMarket(results.market); renderCards();
+ document.querySelectorAll(".filter").forEach(b=>b.onclick=()=>{filterMode=b.dataset.filter;document.querySelectorAll(".filter").forEach(x=>x.classList.remove("active"));b.classList.add("active");renderCards()});
+ document.getElementById("sort").onchange=renderCards;
+ document.getElementById("copy-btn").onclick=copyAll;
 }
-
-function renderMarket(m) {
-  if (!m || !m.indices) return;
-  const idx = document.getElementById('indices');
-  idx.innerHTML = Object.values(m.indices).map(i => `
-    <div class="rounded-lg px-3 py-2 text-sm ${i.correction ? 'bg-amber-100 text-amber-800' : i.pullback ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-50 text-slate-600'}">
-      <b>${i.name}</b> 回調 ${i.drawdown_pct}%
-      ${i.correction ? '· 🔍 開啟雷達' : ''}
-    </div>`).join('');
-  const maxAbs = Math.max(...(m.sectors||[]).map(s => Math.abs(s.rel_vs_spy)), 1);
-  document.getElementById('sectors').innerHTML = (m.sectors||[]).map(s => {
-    const w = Math.abs(s.rel_vs_spy) / maxAbs * 45;
-    const right = s.rel_vs_spy < 0;
-    return `<div class="flex items-center gap-2 text-xs">
-      <span class="w-28 text-right">${right ? s.name : ''}</span>
-      <div class="flex-1 relative h-4 bg-slate-50 rounded">
-        <div class="absolute top-0 bottom-0 ${right ? 'bg-red-400' : 'bg-emerald-500'} rounded"
-             style="${right ? 'right:50%' : 'left:50%'}; width:${w}%"></div>
-        <div class="absolute top-0 bottom-0 w-px bg-slate-300" style="left:50%"></div>
-      </div>
-      <span class="w-28">${right ? '' : s.name}</span>
-      <span class="w-16 ${right ? 'text-red-500' : 'text-emerald-600'}">${s.rel_vs_spy > 0 ? '+' : ''}${s.rel_vs_spy}%</span>
-    </div>`;
-  }).join('');
+function renderMarket(m){
+ const idx=document.getElementById("indices");
+ idx.innerHTML=Object.values(m?.indices||{}).map(i=>{
+  const cls=i.correction?"index-bad":i.pullback?"index-warn":"index-up";
+  const label=i.correction?"CORRECTION":i.pullback?"PULLBACK":"HEALTHY";
+  return '<div class="rounded-2xl border p-4 '+cls+'"><div class="flex justify-between items-center"><b>'+i.name+'</b><span class="text-[10px] font-black">'+label+'</span></div><div class="mt-2 text-sm">回調 <b>'+i.drawdown_pct+'%</b></div></div>';
+ }).join("");
+ const sectors=m?.sectors||[];
+ document.getElementById("sector-empty").classList.toggle("hidden",sectors.length>0);
+ const max=Math.max(...sectors.map(s=>Math.abs(Number(s.rel_vs_spy)||0)),1);
+ document.getElementById("sectors").innerHTML=sectors.map(s=>{
+  const v=Number(s.rel_vs_spy)||0,w=Math.min(Math.abs(v)/max*48,48);
+  return '<div class="grid grid-cols-[105px_1fr_60px] gap-3 items-center text-xs"><span class="muted truncate">'+s.name+'</span><div class="bar"><span style="width:'+w+'%;margin-left:'+(v<0?(50-w):50)+'%;background:'+(v>=0?'#35d399':'#fb7185')+'"></span></div><span class="'+(v>=0?'positive':'negative')+' text-right">'+pct(v)+'</span></div>';
+ }).join("");
 }
-
-function renderTable() {
-  const showWatch = document.getElementById('show-watch').checked;
-  const list = [...(results.results||[])];
-  if (showWatch) list.push(...(results.watchlist||[]));
-  const wrap = document.getElementById('table-wrap');
-  if (!list.length) {
-    wrap.innerHTML = '<div class="bg-white rounded-xl shadow p-8 text-center text-slate-500">今日無符合杯柄條件嘅股票。大市回調時再嚟睇 👀</div>';
-    return;
-  }
-  wrap.innerHTML = list.map(card).join('');
-  list.forEach(e => { if (charts[e.symbol]) drawChart(e); });
+function getList(){
+ let list=filterMode==="match"?(results.results||[]):filterMode==="watch"?(results.watchlist||[]):allEntries();
+ const mode=document.getElementById("sort").value;
+ return [...list].sort((a,b)=>{
+  const A=a.metrics||{},B=b.metrics||{},av=a.stage2?.values||{},bv=b.stage2?.values||{};
+  if(mode==="rs")return (bv.rs_rating||0)-(av.rs_rating||0);
+  if(mode==="pivot")return Math.abs(A.pct_to_pivot||0)-Math.abs(B.pct_to_pivot||0);
+  if(mode==="vcp")return (A.vcp_range_pct||99)-(B.vcp_range_pct||99);
+  if(mode==="volume")return (B.avg_vol_3m||0)-(A.avg_vol_3m||0);
+  return (A.cup_depth_pct||99)-(B.cup_depth_pct||99);
+ });
 }
-
-function sectorBadge(e) {
-  const st = e.sector_strength;
-  if (!st) return '';
-  if (st.tier === 'strong') {
-    return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold bg-orange-100 text-orange-700" title="板塊強勢：${st.etf || ''} 近1個月跑贏大市 ${st.rel_vs_spy > 0 ? '+' : ''}${st.rel_vs_spy}%">🔥 板塊強勢</span>`;
-  }
-  if (st.tier === 'weak') {
-    return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-500" title="板塊偏弱：${st.etf || ''} 近1個月落後大市 ${st.rel_vs_spy}%">板塊偏弱</span>`;
-  }
-  return '';
+function badge(e){
+ const st=e.sector_strength;
+ if(!st)return "";
+ if(st.tier==="strong")return '<span class="px-2 py-1 rounded-full text-[10px] font-bold bg-orange-400/10 text-orange-300 border border-orange-400/20">🔥 板塊強勢</span>';
+ if(st.tier==="weak")return '<span class="px-2 py-1 rounded-full text-[10px] font-bold bg-slate-400/10 text-slate-400 border border-slate-400/15">板塊偏弱</span>';
+ return "";
 }
-
-function card(e) {
-  const m = e.metrics, v = e.stage2.values;
-  return `<details class="bg-white rounded-xl shadow overflow-hidden">
-    <summary class="p-4 flex flex-wrap items-center gap-3 hover:bg-slate-50">
-      <span class="px-2 py-0.5 rounded text-xs font-semibold grade-${e.grade}">${e.grade === 'match' ? '完整杯柄' : '觀察'}</span>
-      <span class="font-bold text-lg">${e.symbol}</span>
-      <span class="text-sm text-slate-500">${e.name}${e.sector ? ' · ' + e.sector : ''}</span>
-      ${sectorBadge(e)}
-      <span class="ml-auto flex gap-4 text-sm text-center">
-        <span>現價<br><b>${m.close}</b></span>
-        <span>杯深度<br><b>${m.cup_depth_pct}%</b></span>
-        <span>VCP波幅<br><b>${m.vcp_range_pct}%</b></span>
-        <span>量縮比<br><b>${m.vdu_ratio ?? '—'}</b></span>
-        <span class="text-blue-700">Pivot<br><b>${m.pivot}</b></span>
-        <span>距Pivot<br><b>${m.pct_to_pivot > 0 ? '+' : ''}${m.pct_to_pivot}%</b></span>
-        <span>RS評級<br><b>${v.rs_rating}</b></span>
-      </span>
-    </summary>
-    <div class="border-t px-4 py-3 grid md:grid-cols-3 gap-4">
-      <div>
-        <h4 class="text-xs font-semibold text-slate-500 mb-2">STAGE 2 八大條件</h4>
-        ${checklist(e.stage2.checks)}
-      </div>
-      <div>
-        <h4 class="text-xs font-semibold text-slate-500 mb-2">杯柄形態檢查</h4>
-        ${checklist(e.checks)}
-        <div class="text-xs text-slate-500 mt-2 leading-5">
-          杯口 ${m.rim_price}（${m.rim_date}）→ 杯底 ${m.bottom_price}（${m.bottom_date}，${m.cup_days} 日）<br>
-          柄部 ${m.handle_days} 日 · 高 ${m.handle_high} / 低 ${m.handle_low}<br>
-          🛑 建議止蝕 <b class="text-red-600">${m.stop_loss}</b> · 🎯 1R 目標 ${m.target_1r}
-        </div>
-      </div>
-      <div>
-        <div id="chart-${e.symbol}" class="h-56"></div>
-      </div>
-    </div>
-  </details>`;
+function metric(label,value,sub,accent){
+ return '<div class="metric rounded-xl p-3"><div class="muted text-[10px]">'+label+'</div><div class="font-bold mt-1 '+(accent||'')+'">'+value+'</div>'+(sub?'<div class="muted text-[10px] mt-0.5">'+sub+'</div>':'')+'</div>';
 }
-
-function checklist(checks) {
-  return '<ul class="text-xs space-y-0.5">' + Object.entries(checks).map(([k, ok]) =>
-    `<li class="${ok ? 'text-slate-600' : 'text-red-500'}">${ok ? '✅' : '❌'} ${CHECK_LABELS[k] || k}</li>`
-  ).join('') + '</ul>';
+function checklist(obj){
+ return Object.entries(obj||{}).map(([k,ok])=>'<div class="flex items-center gap-2 py-1 '+(ok?'text-slate-300':'text-rose-400')+'"><span class="text-[11px]">'+(ok?"✓":"×")+'</span><span>'+ (CHECK_LABELS[k]||k)+'</span></div>').join("");
 }
-
-function drawChart(e) {
-  const el = document.getElementById('chart-' + e.symbol);
-  if (!el) return;
-  const d = charts[e.symbol];
-  const chart = LightweightCharts.createChart(el, {
-    height: 224, layout: { background: { color: '#fff' } }, grid: {
-      vertLines: { color: '#f1f5f9' }, horzLines: { color: '#f1f5f9' } },
-    timeScale: { timeVisible: false, borderVisible: false },
-  });
-  const series = chart.addCandlestickSeries({
-    upColor: '#10b981', downColor: '#ef4444', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#ef4444',
-  });
-  series.setData(d.dates.map((t, i) => ({ time: t, open: d.open[i], high: d.high[i], low: d.low[i], close: d.close[i] })));
-  series.createPriceLine({ price: e.metrics.pivot, color: '#2563eb', lineWidth: 1, lineStyle: 2,
-    axisLabelVisible: true, title: 'Pivot ' + e.metrics.pivot });
-  // 標示杯底
-  const bi = d.dates.indexOf(e.metrics.bottom_date);
-  if (bi >= 0) series.setMarkers([{ position: 'belowBar', color: '#f59e0b', shape: 'circle', time: d.dates[bi] }]);
-  chart.timeScale().fitContent();
+function card(e){
+ const m=e.metrics||{},v=e.stage2?.values||{},isMatch=e.grade==="match";
+ const checks=e.checks||{};
+ const failed=Object.entries(checks).filter(([,x])=>!x).map(([k])=>CHECK_LABELS[k]||k);
+ const score=Object.values(checks).filter(Boolean).length;
+ return '<details class="glass rounded-2xl overflow-hidden '+(isMatch?'match':'watch')+'">'+
+ '<summary class="p-4 md:p-5 card-top flex flex-col lg:flex-row lg:items-center gap-4">'+
+ '<div class="flex items-center gap-3 min-w-[260px]"><div class="score-ring w-11 h-11 rounded-full p-[2px]" style="--score:'+(score*10)+'"><div class="w-full h-full rounded-full bg-[#0d1828] flex items-center justify-center text-xs font-black">'+score+'/10</div></div><div><div class="flex items-center gap-2"><span class="text-xl font-black">'+e.symbol+'</span><span class="px-2 py-0.5 rounded-full text-[10px] font-bold '+(isMatch?'bg-emerald-400/10 text-emerald-300':'bg-amber-400/10 text-amber-300')+'">'+(isMatch?'MATCH':'WATCH')+'</span></div><div class="muted text-xs mt-1">'+e.name+(e.sector?" · "+e.sector:"")+'</div></div></div>'+
+ '<div class="flex flex-wrap gap-2 flex-1 card-metrics grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">'+
+ metric("Price",m.close,"","text-white")+metric("RS",v.rs_rating,"","text-blue-300")+metric("Cup depth",m.cup_depth_pct+"%",m.cup_days+" days")+metric("Handle",m.handle_days+" days",m.handle_depth_pct+"% depth")+metric("VCP",m.vcp_range_pct+"%",m.vdu_ratio!=null?"VDU "+m.vdu_ratio:"")+metric("Pivot",m.pivot,pct(m.pct_to_pivot)+" to pivot","text-blue-300")+
+ '</div><span class="chev text-slate-500 text-lg">⌄</span></summary>'+
+ '<div class="border-t grid lg:grid-cols-[1fr_1fr_1.25fr] gap-5 p-4 md:p-5">'+
+ '<div><div class="flex items-center justify-between mb-2"><h3 class="text-xs font-bold uppercase tracking-wider muted">Stage 2 · 8 checks</h3><span class="text-xs positive">PASS</span></div><div class="text-xs">'+checklist(e.stage2?.checks)+'</div></div>'+
+ '<div><div class="flex items-center justify-between mb-2"><h3 class="text-xs font-bold uppercase tracking-wider muted">Pattern checks</h3><span class="text-xs '+(failed.length?'text-amber-300':'positive')+'">'+(failed.length?failed.length+" failed":"ALL PASS")+'</span></div><div class="text-xs">'+checklist(checks)+'</div><div class="mt-3 text-xs muted leading-6">杯口 <b class="text-slate-200">'+m.rim_price+'</b> · 杯底 <b class="text-slate-200">'+m.bottom_price+'</b> · 柄高 <b class="text-slate-200">'+m.handle_high+'</b><br>🛑 Stop <b class="text-rose-300">'+m.stop_loss+'</b> · 🎯 1R <b class="text-emerald-300">'+m.target_1r+'</b></div></div>'+
+ '<div><div id="chart-'+e.symbol+'" class="h-64 rounded-xl overflow-hidden"></div></div>'+
+ '</div></details>';
 }
-
-function copyAll() {
-  const syms = (results.results||[]).map(e => e.symbol).join(', ');
-  navigator.clipboard.writeText(syms).then(() => {
-    const msg = document.getElementById('copy-msg');
-    msg.classList.remove('hidden');
-    setTimeout(() => msg.classList.add('hidden'), 2000);
-  });
+function renderCards(){
+ const list=getList(),cards=document.getElementById("cards");
+ document.getElementById("shown-count").textContent=list.length+" 隻";
+ const title=document.getElementById("section-title"),sub=document.getElementById("section-subtitle");
+ if(filterMode==="match"){title.textContent="MATCH · 接近完整形態";sub.textContent="Stage 2 + Cup & Handle 條件大致齊全";}
+ else if(filterMode==="watch"){title.textContent="WATCH · 等待改善";sub.textContent="已通過 Stage 2，但仍有形態條件未完全符合";}
+ else{title.textContent="ALL · 全部候選";sub.textContent="MATCH + WATCH";}
+ if(!list.length){cards.innerHTML='<div class="glass rounded-2xl p-10 text-center muted">目前沒有符合此篩選條件的股票。</div>';return;}
+ cards.innerHTML=list.map(card).join("");
+ list.forEach(e=>{if(charts[e.symbol])drawChart(e)});
 }
-
-init();
+function drawChart(e){
+ const el=document.getElementById("chart-"+e.symbol);if(!el)return;
+ const d=charts[e.symbol];if(!d?.dates?.length)return;
+ const chart=LightweightCharts.createChart(el,{height:256,layout:{background:{color:"#0a1626"},textColor:"#8295ad"},grid:{vertLines:{color:"#13243a"},horzLines:{color:"#13243a"}},rightPriceScale:{borderVisible:false},timeScale:{borderVisible:false,timeVisible:false}});
+ const s=chart.addCandlestickSeries({upColor:"#35d399",downColor:"#fb7185",borderVisible:false,wickUpColor:"#35d399",wickDownColor:"#fb7185"});
+ s.setData(d.dates.map((t,i)=>({time:t,open:d.open[i],high:d.high[i],low:d.low[i],close:d.close[i]})));
+ const m=e.metrics||{};
+ if(m.pivot!=null)s.createPriceLine({price:m.pivot,color:"#5ea7ff",lineWidth:1,lineStyle:2,axisLabelVisible:true,title:"Pivot"});
+ if(m.stop_loss!=null)s.createPriceLine({price:m.stop_loss,color:"#fb7185",lineWidth:1,lineStyle:2,axisLabelVisible:true,title:"Stop"});
+ if(m.target_1r!=null)s.createPriceLine({price:m.target_1r,color:"#35d399",lineWidth:1,lineStyle:2,axisLabelVisible:true,title:"1R"});
+ chart.timeScale().fitContent();
+}
+function copyAll(){
+ const text=(results.results||[]).map(e=>e.symbol).join(", ");
+ navigator.clipboard.writeText(text).then(()=>{const x=document.getElementById("copy-msg");x.classList.remove("hidden");setTimeout(()=>x.classList.add("hidden"),1800)});
+}
+init().catch(err=>{console.error(err);document.getElementById("cards").innerHTML='<div class="glass rounded-2xl p-8 text-center text-rose-300">讀取 screener data 失敗，請稍後再試。</div>'});
 </script>
 </body>
 </html>
