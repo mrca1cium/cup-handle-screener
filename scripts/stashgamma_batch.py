@@ -3,7 +3,9 @@ from __future__ import annotations
 
 The batch is deliberately conservative: at most 250 API requests per run,
 cache hits cost zero requests, unavailable symbols are skipped, and a 429
-stops the run immediately. The same command is safe to run repeatedly.
+stops the run immediately. During the initial cache-building phase, only
+symbols without a valid 2y cache are downloaded; stale-cache refreshes do not
+consume the build quota until the snapshot is complete.
 """
 import argparse
 import json
@@ -49,7 +51,7 @@ def load_cache_meta(symbol: str):
 def candidate_symbols() -> List[str]:
     core, extra = get_broad_market()
     rows = core + extra
-    cheap, stats = _cheap_filter(
+    cheap, _stats = _cheap_filter(
         rows,
         min_price=10.0,
         min_current_vol=50_000,
@@ -58,7 +60,8 @@ def candidate_symbols() -> List[str]:
     cheap.sort(key=_rank, reverse=True)
     log.info(
         "Broad=%d；cheap filter passed=%d（market cap >= $2B, price >= $10, current volume >= 50K）",
-        len(rows), len(cheap),
+        len(rows),
+        len(cheap),
     )
     return [r["symbol"] for r in cheap]
 
@@ -111,20 +114,58 @@ def insufficient_symbols(state: dict, now: float) -> set:
     return result
 
 
+def get_universe_snapshot(state: dict, current_symbols: List[str]) -> List[str]:
+    """Persist the cheap-filter universe so later runs do not shrink it.
+
+    Nasdaq metadata such as price/current volume/market cap changes daily.
+    Recomputing the candidate list every batch can therefore make previously
+    eligible symbols disappear before they are downloaded. The first run
+    creates a snapshot; subsequent runs use that same snapshot until the
+    cache-building phase is complete.
+    """
+    raw = state.get("universe_symbols")
+    if isinstance(raw, list) and raw:
+        return [str(s).upper() for s in raw]
+
+    snapshot = []
+    seen = set()
+    for symbol in current_symbols:
+        upper = str(symbol).upper()
+        if upper and upper not in seen:
+            seen.add(upper)
+            snapshot.append(upper)
+
+    save_state(
+        universe_symbols=snapshot,
+        universe_created_at=time.time(),
+        universe_created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    )
+    log.info(
+        "建立 persistent universe snapshot：%d symbols；之後 cache 建立期間不會因 Nasdaq metadata 變化而縮小",
+        len(snapshot),
+    )
+    return snapshot
+
+
 def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     if not os.environ.get("STASHGAMMA_API_KEY"):
         raise SystemExit("找不到 STASHGAMMA_API_KEY")
 
     os.makedirs(LOG_DIR, exist_ok=True)
-    symbols = candidate_symbols()
+    current_symbols = candidate_symbols()
+    state = load_state()
+    symbols = get_universe_snapshot(state, current_symbols)
+
     unavailable = data_mod._load_unavailable()
     state = load_state()
     now = time.time()
     stale_seconds = stale_days * 86400
     insufficient = insufficient_symbols(state, now)
 
-    pending = []
+    missing = []
+    stale = []
     skipped_insufficient = 0
+
     for symbol in symbols:
         upper = symbol.upper()
         if upper in unavailable:
@@ -132,20 +173,29 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         if upper in insufficient:
             skipped_insufficient += 1
             continue
+
         meta = load_cache_meta(symbol)
         if meta is None:
-            pending.append((0, symbol))
+            missing.append(symbol)
             continue
+
         fetched_at = float(meta.get("fetched_at") or 0)
         if now - fetched_at >= stale_seconds:
-            pending.append((1, symbol))
+            stale.append(symbol)
 
-    pending.sort(key=lambda x: (x[0], symbols.index(x[1])))
-    selected = [symbol for _, symbol in pending[:max_requests]]
+    # IMPORTANT: while the snapshot still has uncached symbols, use the entire
+    # request budget only for missing symbols. This prevents stale refreshes
+    # from starving the initial cache build.
+    building_cache = bool(missing)
+    selected_pool = missing if building_cache else stale
+    selected = selected_pool[:max_requests]
 
     log.info(
-        "未完成/需 refresh=%d；insufficient data 暫時跳過=%d；本批最多=%d；實際處理=%d",
-        len(pending),
+        "Cache build=%s；snapshot=%d；missing=%d；stale=%d；insufficient 暫時跳過=%d；本批最多=%d；實際處理=%d",
+        building_cache,
+        len(symbols),
+        len(missing),
+        len(stale),
         skipped_insufficient,
         max_requests,
         len(selected),
@@ -209,12 +259,18 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         if index < len(selected):
             time.sleep(pause)
 
-    # Keep the persistent symbol map under a dedicated key.  The old
-    # implementation wrote the integer count to `insufficient_data`, which
-    # corrupted the map and caused `'int' object does not support item assignment`
-    # / `'int' object is not iterable` on the next run.
     state = load_state()
     persistent_insufficient = get_insufficient_map(state)
+
+    remaining_missing = 0
+    for symbol in symbols:
+        if symbol.upper() in unavailable:
+            continue
+        if symbol.upper() in persistent_insufficient:
+            continue
+        if load_cache_meta(symbol) is None:
+            remaining_missing += 1
+
     save_state(
         insufficient_symbols=persistent_insufficient,
         last_run_at=time.time(),
@@ -225,22 +281,20 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         unavailable=unavailable_count,
         failed=failed,
         rate_limited=rate_limited,
-        remaining_pending=max(
-            0,
-            len(pending) - len(selected)
-            if not rate_limited
-            else len(pending) - success - unavailable_count - failed - insufficient_count,
-        ),
+        cache_building=remaining_missing > 0,
+        remaining_missing=remaining_missing,
+        remaining_pending=(remaining_missing if remaining_missing > 0 else max(0, len(stale) - len(selected))),
     )
 
     log.info(
-        "Batch 完成：requested=%d success=%d insufficient=%d unavailable=%d failed=%d rate_limited=%s",
+        "Batch 完成：requested=%d success=%d insufficient=%d unavailable=%d failed=%d rate_limited=%s；remaining_missing=%d",
         len(selected),
         success,
         insufficient_count,
         unavailable_count,
         failed,
         rate_limited,
+        remaining_missing,
     )
     return 0 if not rate_limited else 2
 
