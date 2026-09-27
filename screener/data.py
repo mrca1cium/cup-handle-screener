@@ -24,7 +24,6 @@ CHART_HOSTS = [
 STASHGAMMA_URL = "https://www.stashgamma.com/api/dataapi/v1/eod/{symbol}"
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 TWELVEDATA_STOCKS_URL = "https://api.twelvedata.com/stocks"
-TWELVEDATA_STOCKS_CACHE = os.path.join(CACHE_DIR, "twelvedata_stocks_us.json")
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
 # StashGamma documents a 300/hour limit. Keep a safety margin so one run
@@ -36,6 +35,7 @@ CACHE_DIR = os.path.join(
     "market",
 )
 UNAVAILABLE_PATH = os.path.join(CACHE_DIR, "stashgamma_unavailable.json")
+TWELVEDATA_STOCKS_CACHE = os.path.join(CACHE_DIR, "twelvedata_stocks_us.json")
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
