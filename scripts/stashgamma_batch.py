@@ -79,22 +79,21 @@ def build_twelvedata_fallback_symbols(
 ) -> List[str]:
     """Build the persistent Twelve Data fallback target set.
 
-    We only keep securities that Twelve Data classifies as equity-like:
+    The persistent universe snapshot is authoritative; current Nasdaq metadata
+    must not shrink the fallback pool during cache construction. We only keep
+    securities that Twelve Data classifies as equity-like:
     common stock, ADR/DR/GDR, limited partnership, or REIT. This avoids
     spending fallback credits on preferreds, funds, units, notes, warrants,
     etc.
     """
     stock_types = data_mod._load_twelvedata_stock_types()
     eligible = set()
-    cheap_set = {str(r.get("symbol", "")).upper() for r in cheap_rows}
     target_set = {
         str(s).upper()
         for s in snapshot
         if str(s).upper() in (unavailable | insufficient)
     }
     for symbol in target_set:
-        if symbol not in cheap_set:
-            continue
         instrument_type = stock_types.get(symbol)
         if data_mod.is_twelvedata_equity_type(instrument_type):
             eligible.add(symbol)
