@@ -23,6 +23,8 @@ CHART_HOSTS = [
 ]
 STASHGAMMA_URL = "https://www.stashgamma.com/api/dataapi/v1/eod/{symbol}"
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+TWELVEDATA_STOCKS_URL = "https://api.twelvedata.com/stocks"
+TWELVEDATA_STOCKS_CACHE = os.path.join(CACHE_DIR, "twelvedata_stocks_us.json")
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
 # StashGamma documents a 300/hour limit. Keep a safety margin so one run
@@ -296,6 +298,94 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
         "low": [r[3] for r in rows],
         "close": [r[4] for r in rows],
         "volume": [r[5] for r in rows],
+    }
+
+
+
+
+def _load_twelvedata_stock_types(timeout: int = 30) -> dict[str, str]:
+    """Load and cache Twelve Data US stock instrument types.
+
+    This is a reference-data request used only to decide which StashGamma
+    failures are sensible historical-data fallback candidates.
+    """
+    try:
+        if os.path.exists(TWELVEDATA_STOCKS_CACHE):
+            with open(TWELVEDATA_STOCKS_CACHE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and payload:
+                return {str(k).upper(): str(v) for k, v in payload.items()}
+    except Exception as e:  # noqa: BLE001
+        log.warning("Twelve Data stocks cache 讀取失敗：%s", e)
+
+    api_key = os.environ.get("TWELVEDATA_API_KEY")
+    if not api_key:
+        raise TwelveDataError(
+            "找不到 TWELVEDATA_API_KEY；無法建立 Twelve Data stock type map"
+        )
+
+    try:
+        r = SESSION.get(
+            TWELVEDATA_STOCKS_URL,
+            params={"country": "United States", "apikey": api_key},
+            timeout=timeout,
+            verify=certifi.where(),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise TwelveDataError("Twelve Data stocks request 失敗：%s" % e)
+
+    if r.status_code == 429:
+        raise TwelveDataRateLimitError("Twelve Data stocks 429 rate limit")
+    if r.status_code != 200:
+        raise TwelveDataError(
+            "Twelve Data stocks HTTP %d: %s" % (r.status_code, r.text[:300])
+        )
+
+    try:
+        payload = r.json()
+    except ValueError as e:
+        raise TwelveDataError("Twelve Data stocks JSON 失敗：%s" % e)
+
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    result = {}
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        instrument_type = str(row.get("type") or "").strip()
+        if symbol and instrument_type:
+            result[symbol] = instrument_type
+
+    if not result:
+        raise TwelveDataUnavailableError("Twelve Data stocks 無有效 data")
+
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = TWELVEDATA_STOCKS_CACHE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, TWELVEDATA_STOCKS_CACHE)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Twelve Data stocks cache 寫入失敗：%s", e)
+
+    log.info("Twelve Data US stock type map：%d symbols", len(result))
+    return result
+
+
+def twelvedata_fallback_type(symbol: str, stock_types: Optional[dict[str, str]] = None) -> Optional[str]:
+    """Return Twelve Data instrument type for a symbol, if known."""
+    if stock_types is None:
+        stock_types = _load_twelvedata_stock_types()
+    return stock_types.get(symbol.upper())
+
+
+def is_twelvedata_equity_type(instrument_type: Optional[str]) -> bool:
+    """Types suitable for the screener's equity-history fallback."""
+    return instrument_type in {
+        "Common Stock",
+        "American Depositary Receipt",
+        "Depositary Receipt",
+        "Global Depositary Receipt",
+        "Limited Partnership",
+        "REIT",
     }
 
 
