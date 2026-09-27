@@ -22,6 +22,7 @@ CHART_HOSTS = [
     "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}",
 ]
 STASHGAMMA_URL = "https://www.stashgamma.com/api/dataapi/v1/eod/{symbol}"
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
 # StashGamma documents a 300/hour limit. Keep a safety margin so one run
@@ -51,6 +52,18 @@ class StashGammaRateLimitError(StashGammaError):
 
 class StashGammaUnavailableError(StashGammaError):
     """StashGamma has no usable data for this symbol (for example HTTP 404)."""
+
+
+class TwelveDataError(RuntimeError):
+    """Twelve Data historical-data request failed."""
+
+
+class TwelveDataRateLimitError(TwelveDataError):
+    """Twelve Data returned a rate-limit response."""
+
+
+class TwelveDataUnavailableError(TwelveDataError):
+    """Twelve Data has no usable history for this symbol."""
 
 
 def _backoff(attempt: int, base: float, cap: float) -> float:
@@ -284,6 +297,142 @@ def _stashgamma(symbol: str, range_: str, timeout: int = 30) -> Optional[dict]:
         "close": [r[4] for r in rows],
         "volume": [r[5] for r in rows],
     }
+
+
+
+def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[dict]:
+    """Fetch daily OHLCV history from Twelve Data as a fallback provider."""
+    api_key = os.environ.get("TWELVEDATA_API_KEY")
+    if not api_key:
+        raise TwelveDataError(
+            "找不到 TWELVEDATA_API_KEY；請先在環境變量設定 Twelve Data API key"
+        )
+
+    outputsize = 500 if range_ == "2y" else 100
+    if range_ not in ("2y", "3mo", "1y", "6mo"):
+        raise TwelveDataError("不支援的 Twelve Data range: %s" % range_)
+
+    try:
+        r = SESSION.get(
+            TWELVEDATA_URL,
+            params={
+                "symbol": symbol.upper(),
+                "interval": "1day",
+                "outputsize": outputsize,
+                "apikey": api_key,
+            },
+            timeout=timeout,
+            verify=certifi.where(),
+        )
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise TwelveDataError("%s request 失敗：%s" % (symbol, e))
+
+    if r.status_code == 429:
+        raise TwelveDataRateLimitError("%s Twelve Data 429 rate limit" % symbol)
+    if r.status_code in (401, 403):
+        raise TwelveDataError(
+            "%s Twelve Data API key 無效或未獲授權（HTTP %d）"
+            % (symbol, r.status_code)
+        )
+    if r.status_code != 200:
+        raise TwelveDataError(
+            "%s Twelve Data HTTP %d: %s" % (symbol, r.status_code, r.text[:300])
+        )
+
+    try:
+        payload = r.json()
+    except ValueError as e:
+        raise TwelveDataError("%s Twelve Data 回傳唔係有效 JSON：%s" % (symbol, e))
+
+    if payload.get("status") == "error":
+        message = str(payload.get("message") or payload.get("code") or "unknown error")
+        if "limit" in message.lower() or "credit" in message.lower():
+            raise TwelveDataRateLimitError("%s Twelve Data: %s" % (symbol, message))
+        raise TwelveDataUnavailableError("%s Twelve Data: %s" % (symbol, message))
+
+    values = payload.get("values", []) if isinstance(payload, dict) else []
+    if not isinstance(values, list) or not values:
+        raise TwelveDataUnavailableError("%s Twelve Data 無 values" % symbol)
+
+    rows = []
+    for item in values:
+        try:
+            if not all(
+                item.get(k) is not None
+                for k in ("datetime", "open", "high", "low", "close", "volume")
+            ):
+                continue
+            rows.append(
+                (
+                    str(item["datetime"]),
+                    float(item["open"]),
+                    float(item["high"]),
+                    float(item["low"]),
+                    float(item["close"]),
+                    float(item["volume"]),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+    if not rows:
+        raise TwelveDataUnavailableError("%s Twelve Data 無有效 bars" % symbol)
+
+    rows.sort(key=lambda x: x[0])
+    return {
+        "dates": [r[0] for r in rows],
+        "open": [r[1] for r in rows],
+        "high": [r[2] for r in rows],
+        "low": [r[3] for r in rows],
+        "close": [r[4] for r in rows],
+        "volume": [r[5] for r in rows],
+    }
+
+
+def fetch_twelvedata(
+    symbol: str,
+    range_: str = "2y",
+    min_bars: int = DEFAULT_MIN_BARS,
+) -> Optional[dict]:
+    """Fetch and cache historical data from Twelve Data only."""
+    symbol = symbol.upper()
+    cached = _load_cache(symbol, range_, min_bars)
+    if cached:
+        return cached
+
+    data = _twelvedata(symbol, range_)
+    if data and len(data["dates"]) >= min_bars:
+        _save_cache(symbol, range_, data, "twelvedata")
+        return data
+
+    if data:
+        log.info(
+            "%s Twelve Data 數據不足（%d bars，要求 %d）",
+            symbol,
+            len(data["dates"]),
+            min_bars,
+        )
+    return None
+
+
+def refresh_twelvedata(
+    symbol: str,
+    min_bars: int = DEFAULT_MIN_BARS,
+) -> Optional[dict]:
+    """Refresh the recent Twelve Data window into an existing 2y cache."""
+    symbol = symbol.upper()
+    cached = _load_cache(symbol, "2y", min_bars)
+    if not cached:
+        return fetch_twelvedata(symbol, "2y", min_bars)
+
+    data = _twelvedata(symbol, "3mo")
+    merged = _merge_daily(cached, data) if data else cached
+    if len(merged["dates"]) >= min_bars:
+        _save_cache(symbol, "2y", merged, "twelvedata")
+        return merged
+    return None
 
 
 def _merge_daily(old: dict, new: dict) -> dict:
