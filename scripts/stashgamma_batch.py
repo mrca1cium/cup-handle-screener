@@ -27,6 +27,7 @@ LOG_DIR = os.path.join(ROOT, ".cache", "logs")
 STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
 INSUFFICIENT_RETRY_DAYS = 30
+TWELVEDATA_DAILY_BUDGET = 350
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +49,7 @@ def load_cache_meta(symbol: str):
         return None
 
 
-def candidate_symbols() -> List[str]:
+def candidate_rows():
     core, extra = get_broad_market()
     rows = core + extra
     cheap, _stats = _cheap_filter(
@@ -63,7 +64,46 @@ def candidate_symbols() -> List[str]:
         len(rows),
         len(cheap),
     )
-    return [r["symbol"] for r in cheap]
+    return cheap
+
+
+def candidate_symbols() -> List[str]:
+    return [r["symbol"] for r in candidate_rows()]
+
+
+def build_twelvedata_fallback_symbols(
+    cheap_rows,
+    snapshot: List[str],
+    unavailable: set,
+    insufficient: set,
+) -> List[str]:
+    """Build the persistent Twelve Data fallback target set.
+
+    We only keep securities that Twelve Data classifies as equity-like:
+    common stock, ADR/DR/GDR, limited partnership, or REIT. This avoids
+    spending fallback credits on preferreds, funds, units, notes, warrants,
+    etc.
+    """
+    stock_types = data_mod._load_twelvedata_stock_types()
+    eligible = set()
+    cheap_set = {str(r.get("symbol", "")).upper() for r in cheap_rows}
+    target_set = {
+        str(s).upper()
+        for s in snapshot
+        if str(s).upper() in (unavailable | insufficient)
+    }
+    for symbol in target_set:
+        if symbol not in cheap_set:
+            continue
+        instrument_type = stock_types.get(symbol)
+        if data_mod.is_twelvedata_equity_type(instrument_type):
+            eligible.add(symbol)
+    result = sorted(eligible)
+    log.info(
+        "Twelve Data fallback candidates=%d（unavailable/insufficient ∩ cheap universe ∩ equity-like）",
+        len(result),
+    )
+    return result
 
 
 def load_state() -> dict:
@@ -150,9 +190,12 @@ def get_universe_snapshot(state: dict, current_symbols: List[str]) -> List[str]:
 def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     if not os.environ.get("STASHGAMMA_API_KEY"):
         raise SystemExit("找不到 STASHGAMMA_API_KEY")
+    if not os.environ.get("TWELVEDATA_API_KEY"):
+        raise SystemExit("找不到 TWELVEDATA_API_KEY")
 
     os.makedirs(LOG_DIR, exist_ok=True)
-    current_symbols = candidate_symbols()
+    cheap_rows = candidate_rows()
+    current_symbols = [r["symbol"] for r in cheap_rows]
     state = load_state()
     symbols = get_universe_snapshot(state, current_symbols)
 
@@ -162,42 +205,70 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     stale_seconds = stale_days * 86400
     insufficient = insufficient_symbols(state, now)
 
+    fallback_symbols = state.get("twelvedata_fallback_symbols")
+    if not isinstance(fallback_symbols, list):
+        fallback_symbols = build_twelvedata_fallback_symbols(
+            cheap_rows,
+            symbols,
+            unavailable,
+            insufficient,
+        )
+        save_state(twelvedata_fallback_symbols=fallback_symbols)
+    fallback_symbols = [str(s).upper() for s in fallback_symbols]
+    fallback_set = set(fallback_symbols)
+
     missing = []
     stale = []
     skipped_insufficient = 0
 
     for symbol in symbols:
         upper = symbol.upper()
-        if upper in unavailable:
-            continue
-        if upper in insufficient:
-            skipped_insufficient += 1
+        meta = load_cache_meta(symbol)
+
+        if meta is None:
+            if upper in fallback_set:
+                continue
+            if upper in unavailable or upper in insufficient:
+                continue
+            missing.append(symbol)
             continue
 
-        meta = load_cache_meta(symbol)
-        if meta is None:
-            missing.append(symbol)
+        if upper in insufficient and upper not in fallback_set:
+            skipped_insufficient += 1
             continue
 
         fetched_at = float(meta.get("fetched_at") or 0)
         if now - fetched_at >= stale_seconds:
             stale.append(symbol)
 
-    # IMPORTANT: while the snapshot still has uncached symbols, use the entire
-    # request budget only for missing symbols. This prevents stale refreshes
-    # from starving the initial cache build.
+    # Initial StashGamma gaps are filled by Twelve Data after ordinary
+    # StashGamma-missing symbols are exhausted. Once fallback targets have
+    # caches, normal stale refreshes route to the provider that owns the cache.
     building_cache = bool(missing)
-    selected_pool = missing if building_cache else stale
-    selected = selected_pool[:max_requests]
+    fallback_missing = [
+        s for s in fallback_symbols
+        if load_cache_meta(s) is None
+    ]
+    if building_cache:
+        selected = missing[:max_requests]
+        selected_provider = "stashgamma"
+    elif fallback_missing:
+        selected = fallback_missing[:min(max_requests, TWELVEDATA_DAILY_BUDGET)]
+        selected_provider = "twelvedata"
+    else:
+        selected = stale[:max_requests]
+        selected_provider = "mixed"
 
     log.info(
-        "Cache build=%s；snapshot=%d；missing=%d；stale=%d；insufficient 暫時跳過=%d；本批最多=%d；實際處理=%d",
+        "Cache build=%s；snapshot=%d；missing=%d；fallback_candidates=%d；fallback_missing=%d；stale=%d；insufficient 暫時跳過=%d；provider=%s；實際處理=%d",
         building_cache,
         len(symbols),
         len(missing),
+        len(fallback_symbols),
+        len(fallback_missing),
         len(stale),
         skipped_insufficient,
-        max_requests,
+        selected_provider,
         len(selected),
     )
 
@@ -210,8 +281,20 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     for index, symbol in enumerate(selected, 1):
         meta = load_cache_meta(symbol)
         refresh = meta is not None
+        provider = "stashgamma"
         try:
-            result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
+            if selected_provider == "twelvedata":
+                provider = "twelvedata"
+                result = (
+                    data_mod.refresh_twelvedata(symbol)
+                    if refresh
+                    else data_mod.fetch_twelvedata(symbol, "2y")
+                )
+            elif selected_provider == "mixed" and meta and meta.get("source") == "twelvedata":
+                provider = "twelvedata"
+                result = data_mod.refresh_twelvedata(symbol) if refresh else data_mod.fetch_twelvedata(symbol, "2y")
+            else:
+                result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
             if result is None:
                 insufficient_count += 1
                 state = load_state()
@@ -236,16 +319,24 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
                     insufficient_map.pop(symbol.upper(), None)
                     save_state(insufficient_symbols=insufficient_map)
                 log.info(
-                    "[%d/%d] %s OK%s",
+                    "[%d/%d] %s OK source=%s%s",
                     index,
                     len(selected),
                     symbol,
+                    provider,
                     " (refresh)" if refresh else "",
                 )
         except data_mod.StashGammaUnavailableError as exc:
             unavailable_count += 1
             data_mod._mark_unavailable(symbol)
             log.warning("[%d/%d] %s 404/unavailable：%s", index, len(selected), symbol, exc)
+        except data_mod.TwelveDataUnavailableError as exc:
+            failed += 1
+            log.warning("[%d/%d] %s Twelve Data unavailable：%s", index, len(selected), symbol, exc)
+        except data_mod.TwelveDataRateLimitError as exc:
+            rate_limited = True
+            log.error("[%d/%d] %s Twelve Data 429，立即停止本批：%s", index, len(selected), symbol, exc)
+            break
         except data_mod.StashGammaRateLimitError as exc:
             rate_limited = True
             log.error("[%d/%d] %s 收到 429，立即停止本批：%s", index, len(selected), symbol, exc)
