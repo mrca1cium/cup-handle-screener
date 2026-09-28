@@ -2,10 +2,12 @@ from __future__ import annotations
 """Run a small, persistent StashGamma batch for the local Mac scheduler.
 
 The batch is deliberately conservative: at most 250 API requests per run,
-cache hits cost zero requests, unavailable symbols are skipped, and a 429
-stops the run immediately. During the initial cache-building phase, only
-symbols without a valid 2y cache are downloaded; stale-cache refreshes do not
-consume the build quota until the snapshot is complete.
+cache hits cost zero requests, unavailable symbols are skipped, and provider
+rate limits stop the run immediately. StashGamma and Twelve Data use separate
+pacing because Twelve Data Basic allows only 8 API credits per minute.
+During the initial cache-building phase, only symbols without a valid 2y cache
+are downloaded; stale-cache refreshes do not consume the build quota until the
+snapshot is complete.
 """
 import argparse
 import json
@@ -28,6 +30,7 @@ STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
 INSUFFICIENT_RETRY_DAYS = 30
 TWELVEDATA_DAILY_BUDGET = 350
+TWELVEDATA_MIN_INTERVAL = 8.0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -276,24 +279,44 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     insufficient_count = 0
     rate_limited = False
     failed = 0
+    last_twelvedata_request = None
 
     for index, symbol in enumerate(selected, 1):
         meta = load_cache_meta(symbol)
         refresh = meta is not None
         provider = "stashgamma"
+
+        if selected_provider == "twelvedata" or (
+            selected_provider == "mixed"
+            and meta
+            and meta.get("source") == "twelvedata"
+        ):
+            provider = "twelvedata"
+
+        # Twelve Data Basic is limited to 8 API credits per minute. Keep at
+        # least 8 seconds between Twelve Data requests so a 250-symbol batch
+        # stays within that limit. StashGamma keeps the caller-supplied pause.
+        if provider == "twelvedata":
+            if last_twelvedata_request is not None:
+                elapsed = time.monotonic() - last_twelvedata_request
+                wait = TWELVEDATA_MIN_INTERVAL - elapsed
+                if wait > 0:
+                    time.sleep(wait)
         try:
             if selected_provider == "twelvedata":
-                provider = "twelvedata"
                 result = (
                     data_mod.refresh_twelvedata(symbol)
                     if refresh
                     else data_mod.fetch_twelvedata(symbol, "2y")
                 )
             elif selected_provider == "mixed" and meta and meta.get("source") == "twelvedata":
-                provider = "twelvedata"
                 result = data_mod.refresh_twelvedata(symbol) if refresh else data_mod.fetch_twelvedata(symbol, "2y")
             else:
                 result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
+
+            if provider == "twelvedata":
+                last_twelvedata_request = time.monotonic()
+
             if result is None:
                 insufficient_count += 1
                 state = load_state()
@@ -346,8 +369,6 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         except Exception as exc:  # noqa: BLE001
             failed += 1
             log.warning("[%d/%d] %s 失敗：%s", index, len(selected), symbol, exc)
-        if index < len(selected):
-            time.sleep(pause)
 
     state = load_state()
     persistent_insufficient = get_insufficient_map(state)
