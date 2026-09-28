@@ -2,15 +2,21 @@
 set -euo pipefail
 
 ROOT="/Users/calcium/cup-handle-screener"
-ENV_FILE="$HOME/.config/cup-handle-screener/stashgamma.env"
+STASHGAMMA_ENV_FILE="$HOME/.config/cup-handle-screener/stashgamma.env"
+TWELVEDATA_ENV_FILE="$HOME/.config/cup-handle-screener/twelvedata.env"
 LOG_DIR="$ROOT/.cache/logs"
 STATE_FILE="$ROOT/.cache/market/stashgamma_schedule_state.json"
 PYTHON="$ROOT/.venv/bin/python"
 
 mkdir -p "$LOG_DIR" "$(dirname "$STATE_FILE")"
 
-if [ ! -f "$ENV_FILE" ]; then
-  echo "Missing $ENV_FILE" >&2
+if [ ! -f "$STASHGAMMA_ENV_FILE" ]; then
+  echo "Missing $STASHGAMMA_ENV_FILE" >&2
+  exit 1
+fi
+
+if [ ! -f "$TWELVEDATA_ENV_FILE" ]; then
+  echo "Missing $TWELVEDATA_ENV_FILE" >&2
   exit 1
 fi
 
@@ -20,7 +26,9 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 # shellcheck disable=SC1090
-source "$ENV_FILE"
+source "$STASHGAMMA_ENV_FILE"
+# shellcheck disable=SC1090
+source "$TWELVEDATA_ENV_FILE"
 cd "$ROOT"
 
 # launchd uses RunAtLoad as a startup/catch-up trigger. Work out the most
@@ -43,7 +51,6 @@ PY
 
 LAST_SLOT="$("$PYTHON" - "$STATE_FILE" <<'PY'
 import json
-import os
 import sys
 path = sys.argv[1]
 try:
@@ -65,7 +72,7 @@ STATUS=$?
 set -e
 
 # Only mark the scheduled slot handled when the batch itself did not hit a
-# StashGamma rate limit. A rate-limited batch remains eligible for a later
+# provider rate limit. A rate-limited batch remains eligible for a later
 # startup/catch-up invocation rather than being silently lost.
 if [ "$STATUS" -ne 2 ]; then
   "$PYTHON" - "$STATE_FILE" "$SCHEDULE_SLOT" <<'PY'
