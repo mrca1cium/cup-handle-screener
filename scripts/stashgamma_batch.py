@@ -302,6 +302,8 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
                 wait = TWELVEDATA_MIN_INTERVAL - elapsed
                 if wait > 0:
                     time.sleep(wait)
+            last_twelvedata_request = time.monotonic()
+
         try:
             if selected_provider == "twelvedata":
                 result = (
@@ -313,9 +315,6 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
                 result = data_mod.refresh_twelvedata(symbol) if refresh else data_mod.fetch_twelvedata(symbol, "2y")
             else:
                 result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
-
-            if provider == "twelvedata":
-                last_twelvedata_request = time.monotonic()
 
             if result is None:
                 insufficient_count += 1
@@ -416,4 +415,4 @@ if __name__ == "__main__":
     ap.add_argument("--stale-days", type=int, default=7)
     ap.add_argument("--pause", type=float, default=0.35)
     args = ap.parse_args()
-    raise SystemExit(run(args.max_requests, args.stale_days, args.pause))
+    raise SystemExit(run(args.max_requests, stale_days=args.stale_days, pause=args.pause))
