@@ -419,8 +419,19 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
     except Exception as e:  # noqa: BLE001
         raise TwelveDataError("%s request 失敗：%s" % (symbol, e))
 
+    # Twelve Data exposes live credit diagnostics in response headers.
+    # Keep these values in the log so a 429 can be distinguished between
+    # minute/day limits instead of guessing from request timing alone.
+    credit_used = r.headers.get("api-credits-used")
+    credit_left = r.headers.get("api-credits-left")
+    retry_after = r.headers.get("Retry-After")
+
     if r.status_code == 429:
-        raise TwelveDataRateLimitError("%s Twelve Data 429 rate limit" % symbol)
+        raise TwelveDataRateLimitError(
+            "%s Twelve Data 429 rate limit; Retry-After=%s; "
+            "api-credits-used=%s; api-credits-left=%s"
+            % (symbol, retry_after, credit_used, credit_left)
+        )
     if r.status_code in (401, 403):
         raise TwelveDataError(
             "%s Twelve Data API key 無效或未獲授權（HTTP %d）"
@@ -439,8 +450,19 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
     if payload.get("status") == "error":
         message = str(payload.get("message") or payload.get("code") or "unknown error")
         if "limit" in message.lower() or "credit" in message.lower():
-            raise TwelveDataRateLimitError("%s Twelve Data: %s" % (symbol, message))
+            raise TwelveDataRateLimitError(
+                "%s Twelve Data: %s; Retry-After=%s; "
+                "api-credits-used=%s; api-credits-left=%s"
+                % (symbol, message, retry_after, credit_used, credit_left)
+            )
         raise TwelveDataUnavailableError("%s Twelve Data: %s" % (symbol, message))
+
+    log.info(
+        "Twelve Data %s credits: used=%s left=%s",
+        symbol,
+        credit_used if credit_used is not None else "?",
+        credit_left if credit_left is not None else "?",
+    )
 
     values = payload.get("values", []) if isinstance(payload, dict) else []
     if not isinstance(values, list) or not values:
