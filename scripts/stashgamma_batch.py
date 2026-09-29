@@ -247,10 +247,22 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     # StashGamma-missing symbols are exhausted. Once fallback targets have
     # caches, normal stale refreshes route to the provider that owns the cache.
     building_cache = bool(missing)
+    # A fallback symbol that was recently marked insufficient must also
+    # respect the 30-day retry window. Without this filter it would be selected
+    # again on every batch and waste one Twelve Data credit each time.
     fallback_missing = [
-        s for s in fallback_symbols
-        if load_cache_meta(s) is None
+        s
+        for s in fallback_symbols
+        if load_cache_meta(s) is None and s not in insufficient
     ]
+
+    # Count fallback symbols that are currently suppressed by the retry window
+    # so the log reflects the real number of temporarily skipped symbols.
+    skipped_insufficient += sum(
+        1
+        for s in fallback_symbols
+        if s in insufficient and load_cache_meta(s) is None
+    )
     if building_cache:
         selected = missing[:max_requests]
         selected_provider = "stashgamma"
