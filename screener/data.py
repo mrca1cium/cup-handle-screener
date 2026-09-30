@@ -24,6 +24,11 @@ CHART_HOSTS = [
 STASHGAMMA_URL = "https://www.stashgamma.com/api/dataapi/v1/eod/{symbol}"
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 TWELVEDATA_STOCKS_URL = "https://api.twelvedata.com/stocks"
+# Twelve Data exposes the actual credit weight of each request in the
+# Api-Credits-Request response header. Keep the latest values here so the
+# batch runner can pace requests based on credits rather than request count.
+TWELVEDATA_LAST_REQUEST_CREDITS = None
+TWELVEDATA_LAST_CREDITS_LEFT = None
 RETRIES = 2
 DEFAULT_MIN_BARS = 252
 # StashGamma documents a 300/hour limit. Keep a safety margin so one run
@@ -420,11 +425,23 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
         raise TwelveDataError("%s request 失敗：%s" % (symbol, e))
 
     # Twelve Data exposes live credit diagnostics in response headers.
-    # Keep these values in the log so a 429 can be distinguished between
-    # minute/day limits instead of guessing from request timing alone.
+    # Api-Credits-Request is the weight of this individual request. The
+    # used/left headers are cumulative for the current minute. We keep all
+    # three so the batch runner can pace from real credit consumption.
+    global TWELVEDATA_LAST_REQUEST_CREDITS, TWELVEDATA_LAST_CREDITS_LEFT
     credit_used = r.headers.get("api-credits-used")
     credit_left = r.headers.get("api-credits-left")
+    credit_request = r.headers.get("api-credits-request")
     retry_after = r.headers.get("Retry-After")
+
+    try:
+        TWELVEDATA_LAST_REQUEST_CREDITS = max(1, int(credit_request))
+    except (TypeError, ValueError):
+        TWELVEDATA_LAST_REQUEST_CREDITS = None
+    try:
+        TWELVEDATA_LAST_CREDITS_LEFT = max(0, int(credit_left))
+    except (TypeError, ValueError):
+        TWELVEDATA_LAST_CREDITS_LEFT = None
 
     if r.status_code == 429:
         raise TwelveDataRateLimitError(
@@ -458,8 +475,9 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
         raise TwelveDataUnavailableError("%s Twelve Data: %s" % (symbol, message))
 
     log.info(
-        "Twelve Data %s credits: used=%s left=%s",
+        "Twelve Data %s credits: request=%s used=%s left=%s",
         symbol,
+        credit_request if credit_request is not None else "?",
         credit_used if credit_used is not None else "?",
         credit_left if credit_left is not None else "?",
     )
@@ -501,6 +519,11 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
         "close": [r[4] for r in rows],
         "volume": [r[5] for r in rows],
     }
+
+
+def get_twelvedata_credit_state() -> tuple[Optional[int], Optional[int]]:
+    """Return (last_request_credits, credits_left) from the latest API call."""
+    return TWELVEDATA_LAST_REQUEST_CREDITS, TWELVEDATA_LAST_CREDITS_LEFT
 
 
 def fetch_twelvedata(
