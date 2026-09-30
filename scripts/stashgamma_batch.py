@@ -30,7 +30,11 @@ STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
 INSUFFICIENT_RETRY_DAYS = 30
 TWELVEDATA_DAILY_BUDGET = 350
+# Basic allows 8 API credits/minute. The actual weight can vary by request,
+# so the runner now reads Api-Credits-Request from every response.
 TWELVEDATA_MIN_INTERVAL = 8.0
+TWELVEDATA_CREDIT_RESET_WAIT = 65.0
+TWELVEDATA_SAFE_MIN_LEFT = 2
 
 logging.basicConfig(
     level=logging.INFO,
@@ -292,6 +296,8 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     rate_limited = False
     failed = 0
     last_twelvedata_request = None
+    last_twelvedata_request_credits = None
+    last_twelvedata_credits_left = None
 
     for index, symbol in enumerate(selected, 1):
         meta = load_cache_meta(symbol)
@@ -305,15 +311,42 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         ):
             provider = "twelvedata"
 
-        # Twelve Data Basic is limited to 8 API credits per minute. Keep at
-        # least 8 seconds between Twelve Data requests so a 250-symbol batch
-        # stays within that limit. StashGamma keeps the caller-supplied pause.
+        # Twelve Data Basic allows 8 API credits/minute. Do not assume
+        # one request equals one credit: Api-Credits-Request tells us the
+        # actual weight after each call.
+        #
+        # If the previous response says fewer than 2 credits remain, wait for
+        # a full minute window before making another request. This is
+        # intentionally conservative because there is no reset timestamp in
+        # the response headers.
         if provider == "twelvedata":
+            if (
+                last_twelvedata_credits_left is not None
+                and last_twelvedata_credits_left < TWELVEDATA_SAFE_MIN_LEFT
+            ):
+                log.info(
+                    "Twelve Data credits left=%d；等待 %.0fs 讓 minute quota reset",
+                    last_twelvedata_credits_left,
+                    TWELVEDATA_CREDIT_RESET_WAIT,
+                )
+                time.sleep(TWELVEDATA_CREDIT_RESET_WAIT)
+                last_twelvedata_credits_left = None
+                last_twelvedata_request_credits = None
+                last_twelvedata_request = None
+
             if last_twelvedata_request is not None:
                 elapsed = time.monotonic() - last_twelvedata_request
-                wait = TWELVEDATA_MIN_INTERVAL - elapsed
+                request_weight = last_twelvedata_request_credits or 1
+                # Pace according to the observed request weight. For example,
+                # weight=2 => at most 4 requests/minute; weight=1 => 8/minute.
+                min_interval = max(
+                    TWELVEDATA_MIN_INTERVAL,
+                    60.0 / max(1, 8 // request_weight),
+                )
+                wait = min_interval - elapsed
                 if wait > 0:
                     time.sleep(wait)
+
             last_twelvedata_request = time.monotonic()
 
         try:
@@ -345,6 +378,20 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
                     data_mod.DEFAULT_MIN_BARS,
                 )
             else:
+                if provider == "twelvedata":
+                    (
+                        last_twelvedata_request_credits,
+                        last_twelvedata_credits_left,
+                    ) = data_mod.get_twelvedata_credit_state()
+                    log.info(
+                        "Twelve Data usage: request_weight=%s credits_left=%s",
+                        last_twelvedata_request_credits
+                        if last_twelvedata_request_credits is not None
+                        else "?",
+                        last_twelvedata_credits_left
+                        if last_twelvedata_credits_left is not None
+                        else "?",
+                    )
                 success += 1
                 state = load_state()
                 insufficient_map = get_insufficient_map(state)
@@ -364,11 +411,31 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
             data_mod._mark_unavailable(symbol)
             log.warning("[%d/%d] %s 404/unavailable：%s", index, len(selected), symbol, exc)
         except data_mod.TwelveDataUnavailableError as exc:
+            if provider == "twelvedata":
+                (
+                    last_twelvedata_request_credits,
+                    last_twelvedata_credits_left,
+                ) = data_mod.get_twelvedata_credit_state()
+                log.info(
+                    "Twelve Data usage after unavailable: request_weight=%s credits_left=%s",
+                    last_twelvedata_request_credits
+                    if last_twelvedata_request_credits is not None
+                    else "?",
+                    last_twelvedata_credits_left
+                    if last_twelvedata_credits_left is not None
+                    else "?",
+                )
             failed += 1
             log.warning("[%d/%d] %s Twelve Data unavailable：%s", index, len(selected), symbol, exc)
         except data_mod.TwelveDataRateLimitError as exc:
             rate_limited = True
-            log.error("[%d/%d] %s Twelve Data 429，立即停止本批：%s", index, len(selected), symbol, exc)
+            log.error(
+                "[%d/%d] %s Twelve Data 429，立即停止本批：%s",
+                index,
+                len(selected),
+                symbol,
+                exc,
+            )
             break
         except data_mod.StashGammaRateLimitError as exc:
             rate_limited = True
