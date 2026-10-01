@@ -12,12 +12,15 @@ import glob
 import json
 import os
 import statistics
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from screener import data as data_mod
 from screener import pattern, stage2
 
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT, ".cache", "market")
 
 
@@ -175,7 +178,6 @@ def main(min_avg_vol=500_000):
             if metrics is not None:
                 stage2_rows.append((sym, d, avg_vol, rating, metrics))
 
-    # Sequential cohorts mirror the current pattern funnel.
     cohorts = {
         "stage2": stage2_rows,
         "depth": [r for r in stage2_rows if 12 <= r[4]["depth_pct"] <= 40],
@@ -200,9 +202,6 @@ def main(min_avg_vol=500_000):
     ]
     cohorts["vcp"] = [
         r for r in cohorts["near_rim"] if r[4]["vcp_range_pct"] <= 10
-    ]
-    cohorts["higher_lows"] = [
-        r for r in cohorts["vcp"] if r[4]["higher_lows"]
     ]
 
     print("=== ZERO-API CUP & HANDLE THRESHOLD DISTRIBUTION ===")
