@@ -1,20 +1,26 @@
 from __future__ import annotations
-"""Zero-API signal history recorder and outcome evaluator.
+"""Zero-API signal history recorder and trading-oriented outcome evaluator.
 
 This script never calls a market-data API. It only reads:
   1. docs/data/results.json
   2. .cache/market/*_2y.json
+
+The history file is append-only by (signal_date, symbol). Existing signals
+are preserved when the evaluator is upgraded.
 
 Usage:
   python3 scripts/signal_history.py
   python3 scripts/signal_history.py --record-only
   python3 scripts/signal_history.py --evaluate-only
 
-Each MATCH/WATCH is stored once per signal date. Later cached bars are used
-to measure pivot breakout, stop, 1R, and price movement after the signal.
+Outcome model:
+  Signal -> Pivot -> Breakout -> R-multiple / MFE / MAE / false breakout.
+
+A breakout is the first future bar whose high reaches the stored pivot.
+A false breakout is a breakout followed by a later low below the pivot before
+the stored 1R target is reached.
 """
 import argparse
-import glob
 import json
 import os
 from datetime import datetime
@@ -26,13 +32,13 @@ HISTORY_PATH = os.path.join(ROOT, "docs", "data", "signal_history.json")
 CACHE_DIR = os.path.join(ROOT, ".cache", "market")
 
 WINDOWS = (1, 3, 5, 10)
+R_LEVELS = (0.5, 1.0, 1.5, 2.0)
 
 
 def load_json(path: str, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            value = json.load(f)
-        return value
+            return json.load(f)
     except (OSError, ValueError):
         return default
 
@@ -143,6 +149,13 @@ def first_index_on_or_after(dates: list, target_date: str) -> Optional[int]:
     return None
 
 
+def as_float(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def evaluate_signal(signal: dict, data: dict) -> bool:
     dates = data.get("dates") or []
     highs = data.get("high") or []
@@ -162,78 +175,122 @@ def evaluate_signal(signal: dict, data: dict) -> bool:
     if signal_idx is None:
         return False
 
-    # We only evaluate completed bars after the signal date.
     future_start = signal_idx + 1
-    available = max(0, n - future_start)
-    if available <= 0:
+    if future_start >= n:
         return False
 
-    pivot = signal.get("pivot")
-    stop = signal.get("stop_loss")
-    target = signal.get("target_1r")
-
-    try:
-        pivot = float(pivot) if pivot is not None else None
-    except (TypeError, ValueError):
-        pivot = None
-    try:
-        stop = float(stop) if stop is not None else None
-    except (TypeError, ValueError):
-        stop = None
-    try:
-        target = float(target) if target is not None else None
-    except (TypeError, ValueError):
-        target = None
+    pivot = as_float(signal.get("pivot"))
+    stop = as_float(signal.get("stop_loss"))
+    target_1r = as_float(signal.get("target_1r"))
+    entry_close = as_float(signal.get("close"))
 
     outcome = signal.setdefault("outcome", {})
     outcome["last_evaluated_date"] = str(dates[-1])[:10]
 
-    # First breakout after the signal. A breakout is based on intraday high
-    # crossing the stored pivot, not the closing price.
-    breakout_idx = None
-    if pivot is not None:
-        for i in range(future_start, n):
-            if highs[i] >= pivot:
-                breakout_idx = i
-                break
+    if pivot is None or entry_close is None:
+        return False
 
-    if breakout_idx is not None:
+    # The stored target_1r is the production screener's 1R target. Derive the
+    # risk unit from the same levels so all historical outcomes use identical
+    # production geometry.
+    risk = None
+    if stop is not None and pivot > stop:
+        risk = pivot - stop
+    elif target_1r is not None and target_1r > pivot:
+        risk = target_1r - pivot
+
+    if risk is not None and risk > 0:
+        outcome["risk_per_share"] = round(risk, 4)
+        outcome["r_levels"] = {
+            "{}R".format(r): round(pivot + risk * r, 4)
+            for r in R_LEVELS
+        }
+    else:
+        outcome["risk_per_share"] = None
+        outcome["r_levels"] = {}
+
+    # A pivot touch is measured from the signal forward. Breakout is the first
+    # bar whose high reaches the pivot.
+    breakout_idx = None
+    pivot_touch_idx = None
+    for i in range(future_start, n):
+        if highs[i] >= pivot:
+            pivot_touch_idx = i
+            breakout_idx = i
+            break
+
+    outcome["pivot_touch"] = (
+        {
+            "date": str(dates[pivot_touch_idx])[:10],
+            "bars_after_signal": pivot_touch_idx - signal_idx,
+        }
+        if pivot_touch_idx is not None
+        else None
+    )
+
+    if breakout_idx is None:
+        outcome["breakout"] = None
+        outcome["breakout_outcome"] = None
+    else:
         outcome["breakout"] = {
             "date": str(dates[breakout_idx])[:10],
             "bars_after_signal": breakout_idx - signal_idx,
         }
-    else:
-        outcome["breakout"] = None
 
-    # Signal-date windows: what happened during the first 1/3/5/10 completed
-    # trading bars after the signal?
-    for window in WINDOWS:
-        end = min(n, future_start + window)
-        if end <= future_start:
-            continue
-        hs = highs[future_start:end]
-        ls = lows[future_start:end]
-        cs = closes[future_start:end]
+        # Start at the breakout bar. The breakout bar is allowed to count as
+        # the first bar for MFE/MAE and R-level touches.
+        max_high = max(highs[breakout_idx:])
+        min_low = min(lows[breakout_idx:])
+        max_high_idx = breakout_idx + highs[breakout_idx:].index(max_high)
+        min_low_idx = breakout_idx + lows[breakout_idx:].index(min_low)
 
-        item = {
-            "bars_available": end - future_start,
-            "max_high": round(max(hs), 4),
-            "min_low": round(min(ls), 4),
-            "last_close": round(cs[-1], 4),
+        breakout_outcome = {
+            "max_high": round(max_high, 4),
+            "max_high_date": str(dates[max_high_idx])[:10],
+            "min_low": round(min_low, 4),
+            "min_low_date": str(dates[min_low_idx])[:10],
+            "max_gain_from_pivot_pct": round((max_high / pivot - 1.0) * 100.0, 2),
+            "max_drawdown_from_pivot_pct": round((min_low / pivot - 1.0) * 100.0, 2),
         }
-        if pivot is not None:
-            item["pivot_hit"] = max(hs) >= pivot
+
+        if risk is not None and risk > 0:
+            for r in R_LEVELS:
+                level = pivot + risk * r
+                breakout_outcome["{}R_hit".format(r)] = max_high >= level
+                breakout_outcome["{}R_level".format(r)] = round(level, 4)
+
+        # Stop hit after breakout.
         if stop is not None:
-            item["stop_hit"] = min(ls) <= stop
-        if target is not None:
-            item["target_1r_hit"] = max(hs) >= target
+            breakout_outcome["stop_hit"] = min_low <= stop
 
-        outcome["signal_window_{}d".format(window)] = item
+        # False breakout: price first reaches pivot, then later trades below
+        # pivot before the stored 1R level is reached. This is deliberately
+        # conservative and uses intraday high/low, not closes.
+        target_level = pivot + risk if risk is not None and risk > 0 else target_1r
+        false_breakout = False
+        false_breakout_idx = None
+        target_hit_idx = None
+        for i in range(breakout_idx, n):
+            if target_level is not None and highs[i] >= target_level:
+                target_hit_idx = i
+                break
+            if i > breakout_idx and lows[i] < pivot:
+                false_breakout = True
+                false_breakout_idx = i
+                break
 
-    # Once a breakout happens, measure the next 1/3/5/10 completed bars from
-    # that breakout. This is the more useful view for a trader interested in
-    # post-pivot behaviour.
-    if breakout_idx is not None:
+        breakout_outcome["target_1r_hit"] = target_hit_idx is not None
+        breakout_outcome["false_breakout"] = false_breakout
+        if false_breakout_idx is not None:
+            breakout_outcome["false_breakout_date"] = str(dates[false_breakout_idx])[:10]
+            breakout_outcome["false_breakout_bars"] = false_breakout_idx - breakout_idx
+        if target_hit_idx is not None:
+            breakout_outcome["target_1r_date"] = str(dates[target_hit_idx])[:10]
+            breakout_outcome["target_1r_bars"] = target_hit_idx - breakout_idx
+
+        outcome["breakout_outcome"] = breakout_outcome
+
+        # Post-breakout windows.
         for window in WINDOWS:
             start = breakout_idx
             end = min(n, start + window + 1)
@@ -247,14 +304,37 @@ def evaluate_signal(signal: dict, data: dict) -> bool:
                 "max_high": round(max(hs), 4),
                 "min_low": round(min(ls), 4),
                 "last_close": round(cs[-1], 4),
+                "pivot_reclaimed": min(ls) >= pivot,
             }
-            if pivot is not None:
-                item["pivot_reclaimed"] = min(ls) >= pivot
+            if risk is not None and risk > 0:
+                for r in R_LEVELS:
+                    item["{}R_hit".format(r)] = max(hs) >= pivot + risk * r
             if stop is not None:
                 item["stop_hit"] = min(ls) <= stop
-            if target is not None:
-                item["target_1r_hit"] = max(hs) >= target
             outcome["breakout_window_{}d".format(window)] = item
+
+    # Signal-date windows are retained because they answer a different
+    # question: how quickly did a setup move toward the pivot or invalidate?
+    for window in WINDOWS:
+        end = min(n, future_start + window)
+        if end <= future_start:
+            continue
+        hs = highs[future_start:end]
+        ls = lows[future_start:end]
+        cs = closes[future_start:end]
+        item = {
+            "bars_available": end - future_start,
+            "max_high": round(max(hs), 4),
+            "min_low": round(min(ls), 4),
+            "last_close": round(cs[-1], 4),
+            "pivot_hit": max(hs) >= pivot,
+        }
+        if stop is not None:
+            item["stop_hit"] = min(ls) <= stop
+        if risk is not None and risk > 0:
+            for r in R_LEVELS:
+                item["{}R_hit".format(r)] = max(hs) >= pivot + risk * r
+        outcome["signal_window_{}d".format(window)] = item
 
     return True
 
@@ -266,11 +346,13 @@ def evaluate_all(history: list[dict]) -> int:
         if not symbol:
             continue
         data = load_cache(symbol)
-        if not data:
-            continue
-        if evaluate_signal(signal, data):
+        if data and evaluate_signal(signal, data):
             evaluated += 1
     return evaluated
+
+
+def pct(numerator, denominator):
+    return 100.0 * numerator / denominator if denominator else 0.0
 
 
 def summary(history: list[dict]):
@@ -296,48 +378,69 @@ def summary(history: list[dict]):
         ]
         if not rows:
             continue
-
         pivot_hit = sum(bool(x.get("pivot_hit")) for x in rows)
-        target_hit = sum(bool(x.get("target_1r_hit")) for x in rows)
         stop_hit = sum(bool(x.get("stop_hit")) for x in rows)
-
+        r1_hit = sum(bool(x.get("1.0R_hit")) for x in rows)
         print(
             "Signal +{}d: n={} pivot_hit={:.1f}% 1R_hit={:.1f}% stop_hit={:.1f}%".format(
-                window,
-                len(rows),
-                100.0 * pivot_hit / len(rows),
-                100.0 * target_hit / len(rows),
-                100.0 * stop_hit / len(rows),
+                window, len(rows), pct(pivot_hit, len(rows)),
+                pct(r1_hit, len(rows)), pct(stop_hit, len(rows))
             )
         )
 
-    breakout_rows = [
+    breakout_signals = [
         s for s in history
         if isinstance(s.get("outcome", {}).get("breakout"), dict)
     ]
-    print("Signals with later pivot breakout:", len(breakout_rows))
+    print("Signals with later pivot breakout:", len(breakout_signals))
 
-    for window in WINDOWS:
-        key = "breakout_window_{}d".format(window)
-        rows = [
-            s.get("outcome", {}).get(key)
-            for s in breakout_rows
-            if isinstance(s.get("outcome", {}).get(key), dict)
-            and s["outcome"][key].get("bars_available", 0) >= window
-        ]
-        if not rows:
-            continue
+    completed = [
+        s for s in breakout_signals
+        if isinstance(s.get("outcome", {}).get("breakout_outcome"), dict)
+    ]
+    if completed:
+        print("Breakout outcomes evaluated:", len(completed))
+        for r in R_LEVELS:
+            key = "{}R_hit".format(r)
+            hits = sum(bool(s["outcome"]["breakout_outcome"].get(key)) for s in completed)
+            print("  +{}R reached: {}/{} ({:.1f}%)".format(
+                r, hits, len(completed), pct(hits, len(completed))
+            ))
 
-        target_hit = sum(bool(x.get("target_1r_hit")) for x in rows)
-        stop_hit = sum(bool(x.get("stop_hit")) for x in rows)
-        print(
-            "Breakout +{}d: n={} 1R_hit={:.1f}% stop_hit={:.1f}%".format(
-                window,
-                len(rows),
-                100.0 * target_hit / len(rows),
-                100.0 * stop_hit / len(rows),
-            )
+        false = sum(
+            bool(s["outcome"]["breakout_outcome"].get("false_breakout"))
+            for s in completed
         )
+        stops = sum(
+            bool(s["outcome"]["breakout_outcome"].get("stop_hit"))
+            for s in completed
+        )
+        print("  False breakout: {}/{} ({:.1f}%)".format(
+            false, len(completed), pct(false, len(completed))
+        ))
+        print("  Stop hit after breakout: {}/{} ({:.1f}%)".format(
+            stops, len(completed), pct(stops, len(completed))
+        ))
+
+        for window in WINDOWS:
+            key = "breakout_window_{}d".format(window)
+            rows = [
+                s["outcome"].get(key)
+                for s in completed
+                if isinstance(s["outcome"].get(key), dict)
+                and s["outcome"][key].get("bars_available", 0) >= window
+            ]
+            if not rows:
+                continue
+            r1 = sum(bool(x.get("1.0R_hit")) for x in rows)
+            stop = sum(bool(x.get("stop_hit")) for x in rows)
+            reclaimed = sum(bool(x.get("pivot_reclaimed")) for x in rows)
+            print(
+                "Breakout +{}d: n={} 1R_hit={:.1f}% stop_hit={:.1f}% pivot_held={:.1f}%".format(
+                    window, len(rows), pct(r1, len(rows)),
+                    pct(stop, len(rows)), pct(reclaimed, len(rows))
+                )
+            )
 
 
 def main(record: bool, evaluate: bool):
@@ -363,6 +466,4 @@ if __name__ == "__main__":
     if args.record_only and args.evaluate_only:
         raise SystemExit("--record-only 同 --evaluate-only 不可同時使用")
 
-    record = not args.evaluate_only
-    evaluate = not args.record_only
-    main(record=record, evaluate=evaluate)
+    main(record=not args.evaluate_only, evaluate=not args.record_only)
