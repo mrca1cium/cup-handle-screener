@@ -82,13 +82,26 @@ def calc_metrics(d):
     vcp_low = min(low[n - vcp_win:])
     vcp_range_pct = (vcp_high - vcp_low) / vcp_high * 100
 
-    seg = max(1, handle_days // 3)
-    thirds = [
-        min(low[handle_start + k * seg:handle_start + (k + 1) * seg])
-        for k in range(3)
-    ]
-    higher_lows = thirds[0] < thirds[1] < thirds[2] if handle_days >= 9 else True
-    lower_lows = thirds[0] > thirds[1] > thirds[2] if handle_days >= 9 else False
+    # Mirror pattern.py safely. For handles under 9 days, the
+    # production logic does not build three segments.
+    if handle_days >= 9:
+        seg = max(1, handle_days // 3)
+        thirds = []
+        for k in range(3):
+            start = handle_start + k * seg
+            end = handle_start + (k + 1) * seg if k < 2 else n
+            segment = low[start:end]
+            thirds.append(min(segment) if segment else None)
+
+        if all(x is not None for x in thirds):
+            higher_lows = thirds[0] < thirds[1] < thirds[2]
+            lower_lows = thirds[0] > thirds[1] > thirds[2]
+        else:
+            higher_lows = False
+            lower_lows = False
+    else:
+        higher_lows = True
+        lower_lows = False
 
     avg3 = sum(vol[-3:]) / 3
     avg50 = sum(vol[-50:]) / 50
