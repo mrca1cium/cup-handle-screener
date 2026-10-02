@@ -160,7 +160,7 @@ def insufficient_symbols(state: dict, now: float) -> set:
     return result
 
 
-def get_universe_snapshot(state: dict, current_symbols: List[str]) -> List[str]:
+def get_universe_snapshot(state: dict, current_symbols: List[str], current_rows=None) -> List[str]:
     """Persist the cheap-filter universe so later runs do not shrink it.
 
     Nasdaq metadata such as price/current volume/market cap changes daily.
@@ -183,6 +183,9 @@ def get_universe_snapshot(state: dict, current_symbols: List[str]) -> List[str]:
 
     save_state(
         universe_symbols=snapshot,
+        universe_rows=list(current_rows or []),
+        universe_core_count=len(current_rows or []),
+        universe_extra_count=0,
         universe_created_at=time.time(),
         universe_created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     )
@@ -203,7 +206,7 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     cheap_rows = candidate_rows()
     current_symbols = [r["symbol"] for r in cheap_rows]
     state = load_state()
-    symbols = get_universe_snapshot(state, current_symbols)
+    symbols = get_universe_snapshot(state, current_symbols, cheap_rows)
 
     unavailable = data_mod._load_unavailable()
     state = load_state()

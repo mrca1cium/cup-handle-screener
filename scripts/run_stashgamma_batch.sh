@@ -95,4 +95,26 @@ os.replace(tmp, path)
 PY
 fi
 
+# Rebuild the public website data from the local cache after every successful
+# batch. This keeps docs/data/results.json and charts.json on the same cache
+# used by the new screener instead of the retired Yahoo workflow.
+if [ "$STATUS" -ne 2 ]; then
+  set +e
+  "$PYTHON" "$ROOT/scripts/build_website_from_cache.py"
+  BUILD_STATUS=$?
+  set -e
+
+  if [ "$BUILD_STATUS" -ne 0 ]; then
+    echo "Website build failed with status $BUILD_STATUS" >&2
+  else
+    /usr/bin/git add docs/data/results.json docs/data/charts.json
+    if ! /usr/bin/git diff --cached --quiet; then
+      /usr/bin/git config user.name "mrca1cium"
+      /usr/bin/git config user.email "mr.calcium@gmail.com"
+      /usr/bin/git commit -m "scan: update website from local cache"
+      /usr/bin/git push
+    fi
+  fi
+fi
+
 exit "$STATUS"
