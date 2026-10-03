@@ -22,6 +22,7 @@ sys.path.insert(0, ROOT)
 
 from screener import data as data_mod  # noqa: E402
 from screener.universe import get_broad_market  # noqa: E402
+from screener.market import SECTORS  # noqa: E402
 from screener.main import _cheap_filter, _rank  # noqa: E402
 
 CACHE_DIR = os.path.join(ROOT, ".cache", "market")
@@ -194,6 +195,31 @@ def get_universe_snapshot(state: dict, current_symbols: List[str], current_rows=
         len(snapshot),
     )
     return snapshot
+
+
+def refresh_sector_etf_cache() -> None:
+    """Refresh sector ETF 2y caches used by the website sector radar.
+
+    These are 15 small, fixed-symbol requests and stay within StashGamma's
+    hourly/day limits when added to the 250-stock scheduled batch.
+    """
+    refreshed = 0
+    failed = 0
+    for symbol in SECTORS:
+        try:
+            data = data_mod.fetch_daily(symbol, "2y", refresh=True)
+            if data:
+                refreshed += 1
+            else:
+                failed += 1
+        except data_mod.StashGammaRateLimitError as exc:
+            failed += 1
+            log.warning("Sector ETF %s rate limited: %s", symbol, exc)
+            break
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            log.warning("Sector ETF %s refresh failed: %s", symbol, exc)
+    log.info("Sector ETF cache refresh：success=%d failed=%d total=%d", refreshed, failed, len(SECTORS))
 
 
 def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
@@ -462,6 +488,12 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
             continue
         if load_cache_meta(symbol) is None:
             remaining_missing += 1
+
+    # Keep the website sector-relative-strength radar current from local cache.
+    # This is separate from the 250-stock batch limit: 15 fixed sector ETF
+    # refreshes keep the total well below StashGamma's 300/hour ceiling.
+    if not rate_limited:
+        refresh_sector_etf_cache()
 
     save_state(
         insufficient_symbols=persistent_insufficient,
