@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 from screener import data as data_mod
 from screener import pattern, stage2
 from screener.main import _cheap_filter
-from screener.market import SECTORS, sector_tag
+from screener.market import INDICES, SECTORS, sector_tag
 from screener.universe import get_broad_market
 
 
@@ -123,6 +123,24 @@ def main() -> int:
     data_date = cache_last_date(all_data)
     generated_at = data_date or market.get("date") or datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
+    # Rebuild market radar from local cache as well; do not preserve stale
+    # market data from a previous website build.
+    market["date"] = data_date or market.get("date")
+    market["indices"] = {}
+    index_proxies = {"^GSPC": "SPY", "^IXIC": "QQQ", "^RUT": "IWM"}
+    for index_symbol, name in INDICES.items():
+        d = all_data.get(index_symbol) or all_data.get(index_proxies.get(index_symbol, ""))
+        if not d or len(d.get("close", [])) < 126:
+            continue
+        hi = max(d["high"][-126:])
+        dd = round((1 - d["close"][-1] / hi) * 100, 1)
+        market["indices"][index_symbol] = {
+            "name": name,
+            "drawdown_pct": dd,
+            "correction": 5 <= dd <= 10,
+            "pullback": 0 < dd < 5,
+        }
+
     spy = all_data.get("SPY")
     sectors_all = []
     if spy and len(spy.get("close", [])) >= 22:
@@ -141,9 +159,10 @@ def main() -> int:
                 "rel_vs_spy": round(ret_1m - spy_ret_1m, 1),
             })
         sectors_all.sort(key=lambda s: s["rel_vs_spy"], reverse=True)
-        market["date"] = data_date or market.get("date")
         market["sectors_all"] = sectors_all
         market["sectors"] = sectors_all[:8]
+        if spy and len(spy_close) >= 126:
+            market["spy_ret_6mo"] = round((spy_close[-1] / spy_close[-126] - 1) * 100, 1)
 
     # Use the persistent cheap-filter snapshot as the universe membership.
     candidates = []
