@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 from screener import data as data_mod
 from screener import pattern, stage2
 from screener.main import _cheap_filter
-from screener.market import sector_tag
+from screener.market import SECTORS, sector_tag
 from screener.universe import get_broad_market
 
 
@@ -117,11 +117,33 @@ def main() -> int:
     metadata = build_metadata(state)
     previous = load_previous_output()
 
-    # Preserve the last known market radar without making extra historical-data
-    # API requests. The stock screener itself is fully refreshed from cache.
-    market = previous.get("market") or {}
+    # Rebuild the sector-relative-strength radar entirely from local cache.
+    # The batch runner refreshes these ETF caches alongside the stock cache.
+    market = dict(previous.get("market") or {})
     data_date = cache_last_date(all_data)
     generated_at = data_date or market.get("date") or datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    spy = all_data.get("SPY")
+    sectors_all = []
+    if spy and len(spy.get("close", [])) >= 22:
+        spy_close = spy["close"]
+        spy_ret_1m = (spy_close[-1] / spy_close[-22] - 1) * 100
+        for etf, name in SECTORS.items():
+            d = all_data.get(etf)
+            if not d or len(d.get("close", [])) < 22:
+                continue
+            c = d["close"]
+            ret_1m = (c[-1] / c[-22] - 1) * 100
+            sectors_all.append({
+                "symbol": etf,
+                "name": name,
+                "ret_1m": round(ret_1m, 1),
+                "rel_vs_spy": round(ret_1m - spy_ret_1m, 1),
+            })
+        sectors_all.sort(key=lambda s: s["rel_vs_spy"], reverse=True)
+        market["date"] = data_date or market.get("date")
+        market["sectors_all"] = sectors_all
+        market["sectors"] = sectors_all[:8]
 
     # Use the persistent cheap-filter snapshot as the universe membership.
     candidates = []
