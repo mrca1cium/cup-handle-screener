@@ -171,6 +171,9 @@ def main() -> int:
         row = metadata.get(symbol, {})
         if not d:
             continue
+        # A recent site-wide date must not conceal a stale individual stock.
+        if not d.get("dates") or str(d["dates"][-1]) < (datetime.date.fromisoformat(data_date) - datetime.timedelta(days=7)).isoformat():
+            continue
         avg_vol = data_mod.average_volume(d, bars=63)
         if avg_vol < 500_000:
             continue
@@ -269,9 +272,10 @@ def main() -> int:
         "min_average_volume": 500_000,
         "qualified_before_cap": len(snapshot),
         "historical_selected": len(snapshot),
-        "historical_downloaded": len(all_data),
+        "historical_downloaded": sum(1 for s in snapshot_set if s in all_data),
         "liquidity_pass": len(candidates),
-        "liquidity_fail": max(0, len(snapshot) - len(candidates)),
+        "liquidity_fail": sum(1 for s in snapshot if s in all_data and data_mod.average_volume(all_data[s], bars=63) < 500_000),
+        "excluded_missing_or_stale": len(snapshot) - len(candidates) - sum(1 for s in snapshot if s in all_data and data_mod.average_volume(all_data[s], bars=63) < 500_000),
         "stage2_pass": stage2_pass,
         "pattern_matches": pattern_candidates,
         "results": len(results),
