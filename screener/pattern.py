@@ -26,10 +26,6 @@ def detect(d: dict) -> dict | None:
     depth_pct = (rim - bot) / rim * 100
     if not (12 <= depth_pct <= 40):
         return None
-    cup_days = bot_i - rim_i  # 下跌段 + 反彈段 = 杯身長度（~21 至 126 個交易日 = 1-6 個月）
-    if not (20 <= cup_days <= 130):
-        return None
-
     # ---- 3. 柄部：杯底反彈至杯口附近（≥ 杯口 90%）之後到現在 ----
     handle_start = None
     for i in range(bot_i, n):
@@ -38,6 +34,11 @@ def detect(d: dict) -> dict | None:
             break
     if handle_start is None:
         return None  # 未反彈到杯口，唔係ready嘅杯柄
+    # Full cup: left rim to the beginning of the handle, including recovery.
+    # The previous implementation incorrectly counted only the decline to the bottom.
+    cup_days = handle_start - rim_i
+    if not (20 <= cup_days <= 130):
+        return None
     handle_days = n - 1 - handle_start
     if handle_days < 4 or handle_days > 42:  # 1 星期至 2 個月
         return None
