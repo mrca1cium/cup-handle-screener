@@ -167,7 +167,7 @@ function getList(){
   if(mode==="rs")return (bv.rs_rating||0)-(av.rs_rating||0);
   if(mode==="pivot")return Math.abs(A.pct_to_pivot||0)-Math.abs(B.pct_to_pivot||0);
   if(mode==="vcp")return (A.vcp_range_pct||99)-(B.vcp_range_pct||99);
-  if(mode==="volume")return (B.avg_vol_3m||0)-(A.avg_vol_3m||0);
+  if(mode==="volume")return (b.avg_volume_63d||0)-(a.avg_volume_63d||0);
   return (A.cup_depth_pct||99)-(B.cup_depth_pct||99);
  });
 }
