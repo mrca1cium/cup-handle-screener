@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#07111f">
-<title>Cup & Handle Terminal — Preview</title>
+<meta name="theme-color" content="#090b18">
+<title>APEX | Market Scanner — Preview</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -78,6 +78,43 @@ header .hero-grid{gap:10px}
 .detail-placeholder{text-align:center;color:#849bb5;font-size:12px;padding:40px 12px}
 @media(max-width:1100px){.workspace{grid-template-columns:1fr}.workspace-list{max-height:400px}}
 @media(max-width:650px){.shell{padding:12px}.workspace-list{max-height:340px}.workspace-detail{padding:12px}.detail-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.checks-grid{grid-template-columns:1fr}.terminal-table td,.terminal-table th{padding:10px 8px}}
+
+/* APEX visual identity: restrained electric violet / cyan accents */
+:root{--bg:#090b18;--panel:#111426;--panel2:#191d34;--line:#343454;--muted:#a0a5c4;--text:#f1f2ff;--blue:#67d8ff;--violet:#a78bfa;--violet-bright:#8b5cf6}
+body{background:radial-gradient(ellipse at 15% -8%,rgba(103,58,183,.19),transparent 39%),radial-gradient(ellipse at 100% 0%,rgba(14,165,233,.07),transparent 36%),#090b18;color:var(--text)}
+header.glass{background:linear-gradient(125deg,rgba(39,30,76,.78),rgba(17,20,38,.97) 54%,rgba(19,30,49,.92));border:1px solid #493e78;position:relative;overflow:hidden}
+header.glass:before{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,#a78bfa,#67d8ff,transparent)}
+.terminal-kicker{font-size:10px;letter-spacing:.14em;font-weight:850;color:#c4b5fd}
+.brand-heading{display:flex;align-items:center;gap:9px;flex-wrap:wrap;line-height:1.3}
+.brand-mark{font-size:21px;color:#ad8dff;text-shadow:0 0 22px rgba(167,139,250,.5)}
+.brand-divider{font-weight:400;color:#77749e}.brand-descriptor{font-weight:500;color:#d9d9ff;font-size:.75em}
+.date-separator{color:#8472b4}
+header .chip{background:rgba(126,90,220,.12);border:1px solid #55437f;color:#d2c7ff}
+header .stat{background:rgba(17,20,39,.62);border:1px solid #3c365d}
+header .stat:nth-child(3){border-color:#326e60;background:linear-gradient(135deg,rgba(15,72,62,.26),rgba(17,20,39,.8))}
+header .stat:nth-child(4){border-color:#6b5435;background:linear-gradient(135deg,rgba(97,70,26,.17),rgba(17,20,39,.8))}
+#copy-btn{background:linear-gradient(115deg,#8b5cf6,#6d5de9);border:1px solid #a58aff;color:white;box-shadow:0 7px 24px rgba(109,80,231,.18);font-weight:800;letter-spacing:.025em}
+#copy-btn:hover{background:linear-gradient(115deg,#a78bfa,#8175f7);border-color:#c4b5fd}
+.btn.active{background:#7c65e9;border-color:#a78bfa;color:#fff}
+.btn:hover{border-color:#8d77ca}
+.workspace-list,.workspace-detail{background:#111426;border-color:#343454}
+.terminal-table th{background:#1b1e36;border-color:#3c3c61;color:#b0b3d0}
+.terminal-table td{border-bottom-color:#2b2c47}
+.terminal-table tr[data-symbol]:hover{background:#232443}
+.terminal-table tr.selected{background:linear-gradient(90deg,rgba(109,69,194,.32),rgba(37,40,70,.56));box-shadow:inset 3px 0 #ae8bff}
+.terminal-table td strong{color:#f1efff}
+.eyebrow{color:#b7a6f5}
+.detail-top h2{color:#f6f2ff}
+.score-large{color:#d5c5ff}
+.chart-caption{color:#b9a8f4}
+.selected-chart{border-color:#373658}
+.detail-metrics .metric{background:#191c32;border-color:#343454}
+.detail-metrics .metric:nth-child(2) div:nth-child(2),.detail-metrics .metric:nth-child(3) div:nth-child(2){color:#67d8ff}
+.checks-detail{border-color:#393756}
+.market-toggle{background:#181b31;border-color:#484068;color:#cfc6f5}
+.market-toggle:hover{border-color:#a78bfa}
+#market-panel{background:#121528;border-color:#38365d}
+@media(max-width:650px){.brand-heading{gap:5px}.brand-descriptor{font-size:.72em}}
 </style>
 </head>
 <body>
@@ -86,20 +123,20 @@ header .hero-grid{gap:10px}
     <div class="hero-grid grid md:grid-cols-[1fr_auto] gap-6 items-start">
       <div>
         <div class="flex flex-wrap items-center gap-2 mb-3">
-          <span class="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-400/10 text-emerald-300 border border-emerald-400/20">LIVE SCREENER</span>
+          <span class="terminal-kicker">US EQUITIES / TECHNICAL SETUP SCANNER</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Stage 2</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Cup & Handle</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">VCP</span>
         </div>
-        <h1 class="text-3xl md:text-4xl font-black tracking-tight">美股杯柄形態篩選器</h1>
-        <p class="muted mt-2 max-w-3xl">由 Stage 2 趨勢 → Cup & Handle → VCP → 量縮逐層篩選，集中顯示接近突破位的候選股。</p>
+        <h1 class="text-3xl md:text-4xl font-black tracking-tight brand-heading"><span class="brand-mark">◆</span> APEX <span class="brand-divider">/</span> <span class="brand-descriptor">Market Scanner</span></h1>
+        
         <div class="flex flex-wrap gap-2 mt-5 text-xs muted">
           <span>最後更新 <b id="gen-date" class="text-slate-200">—</b></span>
-          <span>·</span><span>資料由 backend 產生</span><span>·</span><span>僅供研究參考</span>
+          <span class="date-separator">/</span><span>RESEARCH TERMINAL</span>
         </div>
       </div>
       <div class="flex gap-3 md:justify-end">
-        <button id="copy-btn" class="btn rounded-xl px-4 py-2.5 text-sm font-semibold">📋 Copy MATCH tickers</button>
+        <button id="copy-btn" class="btn rounded-xl px-4 py-2.5 text-sm font-semibold">COPY MATCH TICKERS ↗</button>
         <span id="copy-msg" class="self-center text-xs positive hidden">已複製</span>
       </div>
     </div>
