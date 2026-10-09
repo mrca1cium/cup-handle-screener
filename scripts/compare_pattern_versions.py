@@ -52,6 +52,7 @@ def main():
     ratings = stage2.rs_ratings(all_data, spy["close"])
     transitions = collections.Counter()
     changes = []
+    vcp_summary = collections.Counter()
     eligible = 0
     stage2_count = 0
     for symbol in sorted(set(str(s).upper() for s in snapshot)):
@@ -69,6 +70,9 @@ def main():
         after = new_pattern.detect(d)
         a = before["grade"] if before else "none"
         b = after["grade"] if after else "none"
+        if after:
+            m = after["metrics"]
+            vcp_summary[("tight" if m["vcp_tight_range"] else "not_tight", "contracting" if m["vcp_progressive_contraction"] else "not_contracting")] += 1
         transitions[(a, b)] += 1
         if a != b or (before and after and before["metrics"]["cup_days"] != after["metrics"]["cup_days"]):
             changes.append({
@@ -77,6 +81,8 @@ def main():
                 "old_cup_days": before["metrics"]["cup_days"] if before else None,
                 "new_cup_days": after["metrics"]["cup_days"] if after else None,
                 "new_vcp_ranges": after["metrics"].get("vcp_segment_ranges_pct") if after else None,
+                "new_vcp_tight": after["metrics"].get("vcp_tight_range") if after else None,
+                "new_vcp_progressive": after["metrics"].get("vcp_progressive_contraction") if after else None,
             })
 
     print("Comparison: main vs step4-cup-vcp-review (offline)")
@@ -84,6 +90,9 @@ def main():
     print("Transitions:")
     for (a, b), count in sorted(transitions.items()):
         print("  {:>5} -> {:<5}: {}".format(a, b, count))
+    print("VCP diagnostics among selected new patterns:")
+    for key, count in sorted(vcp_summary.items()):
+        print("  {} / {}: {}".format(key[0], key[1], count))
     print("Changes:", len(changes))
     for row in changes:
         print(" ", json.dumps(row, ensure_ascii=False))
