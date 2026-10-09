@@ -8,6 +8,30 @@ from __future__ import annotations
 from .stage2 import sma
 
 
+def handle_contractions(high: list[float], low: list[float]) -> dict:
+    """Three chronological, non-overlapping handle segments.
+
+    This is a conservative *proxy* for VCP, not a swing-pivot detector.
+    Require at least 9 bars (3 per segment) and strictly decreasing
+    percentage high-low ranges across all three segments.
+    """
+    n = len(high)
+    if n != len(low) or n < 9:
+        return {"confirmed": False, "ranges_pct": []}
+    bounds = [0, n // 3, (2 * n) // 3, n]
+    ranges = []
+    for start, end in zip(bounds, bounds[1:]):
+        h = max(high[start:end])
+        l = min(low[start:end])
+        if h <= 0:
+            return {"confirmed": False, "ranges_pct": []}
+        ranges.append((h - l) / h * 100)
+    return {
+        "confirmed": ranges[0] > ranges[1] > ranges[2],
+        "ranges_pct": [round(v, 2) for v in ranges],
+    }
+
+
 def detect(d: dict) -> dict | None:
     high, low, close, vol, dates = d["high"], d["low"], d["close"], d["volume"], d["dates"]
     n = len(close)
@@ -26,10 +50,6 @@ def detect(d: dict) -> dict | None:
     depth_pct = (rim - bot) / rim * 100
     if not (12 <= depth_pct <= 40):
         return None
-    cup_days = bot_i - rim_i  # 下跌段 + 反彈段 = 杯身長度（~21 至 126 個交易日 = 1-6 個月）
-    if not (20 <= cup_days <= 130):
-        return None
-
     # ---- 3. 柄部：杯底反彈至杯口附近（≥ 杯口 90%）之後到現在 ----
     handle_start = None
     for i in range(bot_i, n):
@@ -38,6 +58,11 @@ def detect(d: dict) -> dict | None:
             break
     if handle_start is None:
         return None  # 未反彈到杯口，唔係ready嘅杯柄
+    # Full cup: left rim to the beginning of the handle, including recovery.
+    # The previous implementation incorrectly counted only the decline to the bottom.
+    cup_days = handle_start - rim_i
+    if not (20 <= cup_days <= 130):
+        return None
     handle_days = n - 1 - handle_start
     if handle_days < 4 or handle_days > 42:  # 1 星期至 2 個月
         return None
@@ -59,6 +84,12 @@ def detect(d: dict) -> dict | None:
     vcp_high = max(high[n - vcp_win:])
     vcp_low = min(low[n - vcp_win:])
     vcp_range_pct = (vcp_high - vcp_low) / vcp_high * 100
+    contraction = handle_contractions(hh, ll)
+    # Keep the original narrow-range score independent of the new diagnostic.
+    # Progressive contraction is reported separately, not an additional hard gate.
+    vcp_tight = vcp_range_pct <= 10
+    vcp_progressive = contraction["confirmed"]
+    vcp_confirmed = vcp_tight and vcp_progressive
 
     # ---- 5. Higher Lows / Lower Lows（柄內分段比較）----
     seg = max(1, handle_days // 3)
@@ -92,7 +123,7 @@ def detect(d: dict) -> dict | None:
         "handle_length_ok": True,
         "handle_shorter_than_cup": True,
         "handle_near_rim": True,
-        "vcp_range_le_10": vcp_range_pct <= 10,
+        "vcp_range_le_10": vcp_tight,
         "higher_lows": higher_lows,
         "no_lower_lows": not lower_lows,
         "volume_dry_up": vdu,
@@ -124,6 +155,10 @@ def detect(d: dict) -> dict | None:
             "handle_low": round(handle_low, 2),
             "handle_depth_pct": round(handle_depth_pct, 1),
             "vcp_range_pct": round(vcp_range_pct, 1),
+            "vcp_contraction_confirmed": vcp_confirmed,
+            "vcp_progressive_contraction": vcp_progressive,
+            "vcp_tight_range": vcp_tight,
+            "vcp_segment_ranges_pct": contraction["ranges_pct"],
             "vdu_ratio": round(avg3 / avg50, 3) if avg50 else None,
             "pivot": round(pivot, 2),
             "close": round(c, 2),
