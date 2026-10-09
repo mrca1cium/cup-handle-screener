@@ -23,12 +23,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-          cache: pip
-          cache-dependency-path: requirements.txt
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install requests certifi
       - name: Run offline regression tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
