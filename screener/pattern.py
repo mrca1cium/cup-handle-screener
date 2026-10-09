@@ -85,9 +85,11 @@ def detect(d: dict) -> dict | None:
     vcp_low = min(low[n - vcp_win:])
     vcp_range_pct = (vcp_high - vcp_low) / vcp_high * 100
     contraction = handle_contractions(hh, ll)
-    # Keep the existing <=10% narrow-range gate, but additionally require
-    # progressive contraction rather than treating any tight range as VCP.
-    vcp_confirmed = vcp_range_pct <= 10 and contraction["confirmed"]
+    # Keep the original narrow-range score independent of the new diagnostic.
+    # Progressive contraction is reported separately, not an additional hard gate.
+    vcp_tight = vcp_range_pct <= 10
+    vcp_progressive = contraction["confirmed"]
+    vcp_confirmed = vcp_tight and vcp_progressive
 
     # ---- 5. Higher Lows / Lower Lows（柄內分段比較）----
     seg = max(1, handle_days // 3)
@@ -121,7 +123,7 @@ def detect(d: dict) -> dict | None:
         "handle_length_ok": True,
         "handle_shorter_than_cup": True,
         "handle_near_rim": True,
-        "vcp_range_le_10": vcp_confirmed,
+        "vcp_range_le_10": vcp_tight,
         "higher_lows": higher_lows,
         "no_lower_lows": not lower_lows,
         "volume_dry_up": vdu,
@@ -153,7 +155,9 @@ def detect(d: dict) -> dict | None:
             "handle_low": round(handle_low, 2),
             "handle_depth_pct": round(handle_depth_pct, 1),
             "vcp_range_pct": round(vcp_range_pct, 1),
-            "vcp_contraction_confirmed": contraction["confirmed"],
+            "vcp_contraction_confirmed": vcp_confirmed,
+            "vcp_progressive_contraction": vcp_progressive,
+            "vcp_tight_range": vcp_tight,
             "vcp_segment_ranges_pct": contraction["ranges_pct"],
             "vdu_ratio": round(avg3 / avg50, 3) if avg50 else None,
             "pivot": round(pivot, 2),
