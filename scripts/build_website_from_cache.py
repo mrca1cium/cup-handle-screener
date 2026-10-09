@@ -119,7 +119,7 @@ def main() -> int:
 
     # Rebuild the sector-relative-strength radar entirely from local cache.
     # The batch runner refreshes these ETF caches alongside the stock cache.
-    market = dict(previous.get("market") or {})
+    market = {}
     data_date = cache_last_date(all_data)
     # Relative freshness guard; the reference date is the newest cached bar.
     freshness_cutoff = (datetime.date.fromisoformat(data_date) - datetime.timedelta(days=7)).isoformat() if data_date else None
@@ -127,17 +127,21 @@ def main() -> int:
 
     # Rebuild market radar from local cache as well; do not preserve stale
     # market data from a previous website build.
-    market["date"] = data_date or market.get("date")
+    market["date"] = data_date
     market["indices"] = {}
     index_proxies = {"^GSPC": "SPY", "^IXIC": "QQQ", "^RUT": "IWM"}
     for index_symbol, name in INDICES.items():
-        d = all_data.get(index_symbol) or all_data.get(index_proxies.get(index_symbol, ""))
-        if not d or len(d.get("close", [])) < 126:
+        source = index_symbol if index_symbol in all_data else index_proxies.get(index_symbol, "")
+        d = all_data.get(source)
+        if not d or len(d.get("close", [])) < 126 or not d.get("dates") or (freshness_cutoff and str(d["dates"][-1]) < freshness_cutoff):
             continue
         hi = max(d["high"][-126:])
         dd = round((1 - d["close"][-1] / hi) * 100, 1)
         market["indices"][index_symbol] = {
             "name": name,
+            "source_symbol": source,
+            "is_proxy": source != index_symbol,
+            "data_date": str(d["dates"][-1]),
             "drawdown_pct": dd,
             "correction": 5 <= dd <= 10,
             "pullback": 0 < dd < 5,
@@ -145,26 +149,29 @@ def main() -> int:
 
     spy = all_data.get("SPY")
     sectors_all = []
-    if spy and len(spy.get("close", [])) >= 22:
+    if spy and len(spy.get("close", [])) >= 22 and spy.get("dates") and (not freshness_cutoff or str(spy["dates"][-1]) >= freshness_cutoff):
         spy_close = spy["close"]
         spy_ret_1m = (spy_close[-1] / spy_close[-22] - 1) * 100
         for etf, name in SECTORS.items():
             d = all_data.get(etf)
-            if not d or len(d.get("close", [])) < 22:
+            if not d or len(d.get("close", [])) < 22 or not d.get("dates") or (freshness_cutoff and str(d["dates"][-1]) < freshness_cutoff):
                 continue
             c = d["close"]
             ret_1m = (c[-1] / c[-22] - 1) * 100
             sectors_all.append({
                 "symbol": etf,
                 "name": name,
+                "data_date": str(d["dates"][-1]),
                 "ret_1m": round(ret_1m, 1),
                 "rel_vs_spy": round(ret_1m - spy_ret_1m, 1),
             })
         sectors_all.sort(key=lambda s: s["rel_vs_spy"], reverse=True)
-        market["sectors_all"] = sectors_all
-        market["sectors"] = sectors_all[:8]
         if spy and len(spy_close) >= 126:
             market["spy_ret_6mo"] = round((spy_close[-1] / spy_close[-126] - 1) * 100, 1)
+
+    market["sectors_all"] = sectors_all
+    market["sectors"] = sectors_all[:8]
+    market["sector_coverage"] = {"available": len(sectors_all), "expected": len(SECTORS), "missing": [s for s in SECTORS if s not in {x["symbol"] for x in sectors_all}]}
 
     # Use the persistent cheap-filter snapshot as the universe membership.
     candidates = []
@@ -264,6 +271,9 @@ def main() -> int:
         "core": state.get("universe_core_count"),
         "sp1500": state.get("universe_core_count"),
         "nasdaq_candidates": state.get("universe_extra_count"),
+        "universe_stats_date": state.get("universe_stats_date"),
+        "broad_input": state.get("universe_broad_count"),
+        "cheap_filter_original": state.get("universe_cheap_stats"),
         "cheap_filter": {
             "input": len(snapshot),
             "passed": len(snapshot),
