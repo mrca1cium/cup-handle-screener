@@ -121,6 +121,8 @@ def main() -> int:
     # The batch runner refreshes these ETF caches alongside the stock cache.
     market = dict(previous.get("market") or {})
     data_date = cache_last_date(all_data)
+    # Relative freshness guard; the reference date is the newest cached bar.
+    freshness_cutoff = (datetime.date.fromisoformat(data_date) - datetime.timedelta(days=7)).isoformat() if data_date else None
     generated_at = data_date or market.get("date") or datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
     # Rebuild market radar from local cache as well; do not preserve stale
@@ -172,7 +174,7 @@ def main() -> int:
         if not d:
             continue
         # A recent site-wide date must not conceal a stale individual stock.
-        if not d.get("dates") or str(d["dates"][-1]) < (datetime.date.fromisoformat(data_date) - datetime.timedelta(days=7)).isoformat():
+        if not d.get("dates") or (freshness_cutoff is not None and str(d["dates"][-1]) < freshness_cutoff):
             continue
         avg_vol = data_mod.average_volume(d, bars=63)
         if avg_vol < 500_000:
