@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#07111f">
-<title>美股杯柄形態篩選器 | US Cup & Handle Screener</title>
+<meta name="theme-color" content="#090b18">
+<title>APEX | Market Scanner</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -36,6 +36,159 @@
   .positive{color:var(--green)} .negative{color:var(--red)}
   .score-ring{background:conic-gradient(var(--green) calc(var(--score)*1%),#20334b 0)}
   @media(max-width:900px){.shell{padding:12px}.hero-grid{grid-template-columns:1fr}.metric-row{grid-template-columns:repeat(2,minmax(0,1fr))}.desktop-only{display:none}.card-top{align-items:flex-start}.card-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Frontend preview: terminal-style typography, hierarchy and split workspace */
+:root{--bg:#090f19;--panel:#0c1726;--panel2:#122037;--line:#25374e;--muted:#91a5bd;--text:#edf4ff}
+body{background:#090f19}
+.shell{max-width:1720px;padding:22px 28px}
+.glass{box-shadow:none;backdrop-filter:none;border-radius:9px}
+header.glass{padding:21px 25px;margin-bottom:14px}
+header h1{font-size:26px!important;letter-spacing:.045em}
+header .stat{border-radius:7px;padding:12px}
+header .stat .text-2xl{font-size:29px}
+header .hero-grid{gap:10px}
+#market-panel{display:none;margin-top:12px}
+#market-panel.visible{display:block}
+#opportunities{margin-top:14px}
+#opportunities h2{font-size:17px;letter-spacing:.06em}
+.workspace{display:grid;grid-template-columns:minmax(420px,44%) minmax(0,56%);gap:14px;align-items:start}
+.workspace-list,.workspace-detail{background:#0c1726;border:1px solid #263850;border-radius:9px;min-width:0;overflow:hidden}
+.workspace-list{max-height:820px;overflow:auto}.workspace-detail{padding:18px;min-height:570px}
+.table-scroll{overflow-x:auto}.terminal-table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap;font-size:12px}
+.terminal-table th{font-size:10px;letter-spacing:.07em;color:#8da2bc;background:#142239;padding:14px 10px;border-bottom:1px solid #2b3d55}
+.terminal-table td{padding:14px 10px;border-bottom:1px solid #1d2c41;font-variant-numeric:tabular-nums}
+.terminal-table tr[data-symbol]{cursor:pointer}.terminal-table tr[data-symbol]:hover{background:#18283d}
+.terminal-table tr.selected{background:#1a3544;box-shadow:inset 3px 0 #35d399}
+.terminal-table td strong{display:block;color:#edf5ff;font-size:14px}
+.terminal-table td small{display:block;max-width:140px;overflow:hidden;text-overflow:ellipsis;color:#8da0b7;font-size:10px;margin-top:3px}
+.grade{font-size:10px;font-weight:800;padding:4px 6px;border-radius:4px}.grade-match{background:#103e31;color:#45e4aa}.grade-watch{background:#453619;color:#f6ce72}
+.eyebrow{font-size:10px;letter-spacing:.13em;color:#88a4c1;font-weight:800}
+.detail-top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}
+.detail-top h2{font-size:27px;font-weight:900;margin:4px 0;display:flex;align-items:center;gap:10px}
+.detail-top p{color:#8fa4bc;font-size:11px}.score-large{font-size:28px;font-weight:900}.score-large small{font-size:13px;color:#8498b1}
+.chart-caption{font-size:10px;letter-spacing:.07em;font-weight:800;color:#90a7c0;display:flex;justify-content:space-between;margin-bottom:8px}
+.selected-chart{min-height:330px;border:1px solid #25354c;border-radius:5px;overflow:hidden}
+.detail-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}
+.detail-metrics .metric{border-radius:5px;padding:10px}.detail-metrics .metric>div:nth-child(2){font-size:15px}
+.checks-detail{border-top:1px solid #273a52;margin-top:16px;padding-top:15px}
+.checks-detail summary{font-size:11px;letter-spacing:.07em;font-weight:800;color:#d8e5f5}
+.checks-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:14px}.checks-grid h3{font-size:11px;color:#9bb2cb;margin-bottom:9px}
+.risk-info{font-size:11px;color:#b5c5d8;margin-top:10px}
+.market-toggle{margin-top:16px;width:100%;text-align:left;border:1px solid #293c53;background:#101d2f;border-radius:7px;padding:14px 18px;color:#cbdcf0;font-size:11px;letter-spacing:.08em;font-weight:800}
+.detail-placeholder{text-align:center;color:#849bb5;font-size:12px;padding:40px 12px}
+@media(max-width:1100px){.workspace{grid-template-columns:1fr}.workspace-list{max-height:400px}}
+@media(max-width:650px){.shell{padding:12px}.workspace-list{max-height:340px}.workspace-detail{padding:12px}.detail-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.checks-grid{grid-template-columns:1fr}.terminal-table td,.terminal-table th{padding:10px 8px}}
+
+/* APEX visual identity: restrained electric violet / cyan accents */
+:root{--bg:#090b18;--panel:#111426;--panel2:#191d34;--line:#343454;--muted:#a0a5c4;--text:#f1f2ff;--blue:#67d8ff;--violet:#a78bfa;--violet-bright:#8b5cf6}
+body{background:radial-gradient(ellipse at 15% -8%,rgba(103,58,183,.19),transparent 39%),radial-gradient(ellipse at 100% 0%,rgba(14,165,233,.07),transparent 36%),#090b18;color:var(--text)}
+header.glass{background:linear-gradient(125deg,rgba(39,30,76,.78),rgba(17,20,38,.97) 54%,rgba(19,30,49,.92));border:1px solid #493e78;position:relative;overflow:hidden}
+header.glass:before{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,#a78bfa,#67d8ff,transparent)}
+.terminal-kicker{font-size:10px;letter-spacing:.14em;font-weight:850;color:#c4b5fd}
+.brand-heading{display:flex;align-items:center;gap:9px;flex-wrap:wrap;line-height:1.3}
+.brand-mark{font-size:21px;color:#ad8dff;text-shadow:0 0 22px rgba(167,139,250,.5)}
+.brand-divider{font-weight:400;color:#77749e}.brand-descriptor{font-weight:500;color:#d9d9ff;font-size:.75em}
+.date-separator{color:#8472b4}
+header .chip{background:rgba(126,90,220,.12);border:1px solid #55437f;color:#d2c7ff}
+header .stat{background:rgba(17,20,39,.62);border:1px solid #3c365d}
+header .stat:nth-child(3){border-color:#326e60;background:linear-gradient(135deg,rgba(15,72,62,.26),rgba(17,20,39,.8))}
+header .stat:nth-child(4){border-color:#6b5435;background:linear-gradient(135deg,rgba(97,70,26,.17),rgba(17,20,39,.8))}
+#copy-btn{background:linear-gradient(115deg,#8b5cf6,#6d5de9);border:1px solid #a58aff;color:white;box-shadow:0 7px 24px rgba(109,80,231,.18);font-weight:800;letter-spacing:.025em}
+#copy-btn:hover{background:linear-gradient(115deg,#a78bfa,#8175f7);border-color:#c4b5fd}
+.btn.active{background:#7c65e9;border-color:#a78bfa;color:#fff}
+.btn:hover{border-color:#8d77ca}
+.workspace-list,.workspace-detail{background:#111426;border-color:#343454}
+.terminal-table th{background:#1b1e36;border-color:#3c3c61;color:#b0b3d0}
+.terminal-table td{border-bottom-color:#2b2c47}
+.terminal-table tr[data-symbol]:hover{background:#232443}
+.terminal-table tr.selected{background:linear-gradient(90deg,rgba(109,69,194,.32),rgba(37,40,70,.56));box-shadow:inset 3px 0 #ae8bff}
+.terminal-table td strong{color:#f1efff}
+.eyebrow{color:#b7a6f5}
+.detail-top h2{color:#f6f2ff}
+.score-large{color:#d5c5ff}
+.chart-caption{color:#b9a8f4}
+.selected-chart{border-color:#373658}
+.detail-metrics .metric{background:#191c32;border-color:#343454}
+.detail-metrics .metric:nth-child(2) div:nth-child(2),.detail-metrics .metric:nth-child(3) div:nth-child(2){color:#67d8ff}
+.checks-detail{border-color:#393756}
+.market-toggle{background:#181b31;border-color:#484068;color:#cfc6f5}
+.market-toggle:hover{border-color:#a78bfa}
+#market-panel{background:#121528;border-color:#38365d}
+@media(max-width:650px){.brand-heading{gap:5px}.brand-descriptor{font-size:.72em}}
+
+/* APEX restrained accent refinement: neutral navy surfaces, violet only as a touch */
+:root{--bg:#090f19;--panel:#0d1725;--panel2:#142035;--line:#29384d;--muted:#94a5ba;--text:#edf3fb}
+body{background:#090f19;color:#edf3fb}
+header.glass{background:#111b2a;border:1px solid #2a3a50}
+header.glass:before{height:2px;background:linear-gradient(90deg,#9c85e9 0%,#55c9e9 26%,transparent 62%)}
+header .chip{background:#182337;border-color:#33445c;color:#aebed3}
+header .stat{background:#121f30;border-color:#2b3c52}
+header .stat:nth-child(3){background:#122b29;border-color:#2c5148}
+header .stat:nth-child(4){background:#302719;border-color:#56442b}
+.brand-heading,.brand-descriptor{color:#eef3fc}
+.brand-mark{color:#ac9be6;text-shadow:none}
+.brand-divider{color:#6e8199}
+.terminal-kicker{color:#9faac4}
+.date-separator{color:#8192a8}
+#copy-btn{background:#6658b6;border-color:#8476d2;box-shadow:none}
+#copy-btn:hover{background:#7567c5;border-color:#a69adf}
+.btn.active{background:#41536d;border-color:#627895;color:#fff}
+.btn:hover{border-color:#617893}
+.workspace-list,.workspace-detail{background:#0d1725;border-color:#293a50}
+.terminal-table th{background:#162236;border-color:#2b3c52;color:#9cafc5}
+.terminal-table td{border-bottom-color:#223147}
+.terminal-table tr[data-symbol]:hover{background:#1a2a3e}
+.terminal-table tr.selected{background:#1b3043;box-shadow:inset 3px 0 #9585d8}
+.terminal-table td strong{color:#edf3fb}
+.eyebrow{color:#9caec4}
+.detail-top h2{color:#f0f5fc}
+.score-large{color:#e0e9f5}
+.chart-caption{color:#9eb3cc}
+.selected-chart{border-color:#293a50}
+.detail-metrics .metric{background:#132034;border-color:#2b3c52}
+.detail-metrics .metric:nth-child(2) div:nth-child(2),.detail-metrics .metric:nth-child(3) div:nth-child(2){color:#6ec9ed}
+.checks-detail{border-color:#2c3e55}
+.market-toggle{background:#142136;border-color:#2d4059;color:#c9d7e7}
+.market-toggle:hover{border-color:#7785b7}
+#market-panel{background:#101c2c;border-color:#293b52}
+
+/* Balanced APEX palette: violet lighting, never violet page backgrounds */
+body{background:radial-gradient(ellipse 48% 26% at 50% -14%,rgba(100,76,177,.13),transparent 88%),#090f19}
+header.glass{background:radial-gradient(ellipse 68% 110% at 8% 0%,rgba(109,82,190,.17),transparent 78%),linear-gradient(120deg,#172139 0%,#111b2c 58%,#101d2d 100%);border-color:#3b4163}
+header.glass:before{height:2px;background:linear-gradient(90deg,#9b85ef 0%,#6fbbef 48%,transparent 85%)}
+.brand-mark{color:#baa4ff;text-shadow:0 0 14px rgba(168,139,250,.27)}
+.brand-descriptor{color:#e3e5ff}
+.terminal-kicker{color:#b5b5e4}
+header .chip{background:rgba(89,77,142,.13);border-color:#474769;color:#c6c6e6}
+header .stat{background:linear-gradient(140deg,rgba(29,38,61,.92),rgba(17,29,45,.93));border-color:#37445e}
+header .stat:nth-child(3){background:linear-gradient(125deg,#15352f,#172539);border-color:#356359}
+header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);border-color:#6a5132}
+#copy-btn{background:linear-gradient(110deg,#7b63d2,#5e67ba);border-color:#a190e5;box-shadow:0 5px 17px rgba(108,88,192,.17)}
+#copy-btn:hover{background:linear-gradient(110deg,#9076e2,#6c77ca)}
+.btn.active{background:#6158a0;border-color:#9e90dc;color:#fff}
+.workspace-list,.workspace-detail{background:#101b2b;border-color:#34425d}
+.terminal-table th{background:linear-gradient(100deg,#1b2840,#1a2539);border-color:#34445e}
+.terminal-table tr.selected{background:linear-gradient(90deg,rgba(92,77,161,.24),rgba(24,47,67,.78));box-shadow:inset 3px 0 #aa96ef}
+.terminal-table tr[data-symbol]:hover{background:#233049}
+.detail-top .eyebrow{color:#b1a7e1}
+.score-large{color:#c4b8ff}
+.chart-caption{color:#aeb4d5}
+.detail-metrics .metric{background:linear-gradient(130deg,#17253a,#142034);border-color:#33445e}
+.market-toggle{background:linear-gradient(90deg,#1b2640,#142238);border-color:#3e4568}
+.market-toggle:hover{border-color:#9483d0}
+
+/* Scanner usability refinement */
+.sort-head{display:inline-flex;align-items:center;gap:4px;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer}
+.sort-head:hover,.sort-head.sorted{color:#b6a6f6}
+.rs-cell{color:#7bd8ef;font-weight:750}
+.pivot-distance{display:inline-block;padding:4px 7px;border-radius:5px;font-weight:750;font-variant-numeric:tabular-nums}
+.pivot-near{background:rgba(43,185,145,.13);color:#5ee0b6}
+.pivot-above{background:rgba(245,196,81,.12);color:#f4c979}
+.pivot-away{background:rgba(101,156,208,.12);color:#a5c8f1}
+.pivot-unknown{color:#8899ad}
+.terminal-table th{position:sticky;top:0;z-index:2}
+.workspace-detail{position:sticky;top:12px}
+@media(max-width:1100px){.workspace-detail{position:static}}
 </style>
 </head>
 <body>
@@ -44,20 +197,20 @@
     <div class="hero-grid grid md:grid-cols-[1fr_auto] gap-6 items-start">
       <div>
         <div class="flex flex-wrap items-center gap-2 mb-3">
-          <span class="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-400/10 text-emerald-300 border border-emerald-400/20">LIVE SCREENER</span>
+          <span class="terminal-kicker">US EQUITIES / TECHNICAL SETUP SCANNER</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Stage 2</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">Cup & Handle</span>
           <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold chip">VCP</span>
         </div>
-        <h1 class="text-3xl md:text-4xl font-black tracking-tight">美股杯柄形態篩選器</h1>
-        <p class="muted mt-2 max-w-3xl">由 Stage 2 趨勢 → Cup & Handle → VCP → 量縮逐層篩選，集中顯示接近突破位的候選股。</p>
+        <h1 class="text-3xl md:text-4xl font-black tracking-tight brand-heading"><span class="brand-mark">◆</span> APEX <span class="brand-divider">/</span> <span class="brand-descriptor">Market Scanner</span></h1>
+        
         <div class="flex flex-wrap gap-2 mt-5 text-xs muted">
           <span>最後更新 <b id="gen-date" class="text-slate-200">—</b></span>
-          <span>·</span><span>資料由 backend 產生</span><span>·</span><span>僅供研究參考</span>
+          <span class="date-separator">/</span><span>RESEARCH TERMINAL</span>
         </div>
       </div>
       <div class="flex gap-3 md:justify-end">
-        <button id="copy-btn" class="btn rounded-xl px-4 py-2.5 text-sm font-semibold">📋 Copy MATCH tickers</button>
+        <button id="copy-btn" class="btn rounded-xl px-4 py-2.5 text-sm font-semibold">COPY MATCH TICKERS ↗</button>
         <span id="copy-msg" class="self-center text-xs positive hidden">已複製</span>
       </div>
     </div>
@@ -69,7 +222,7 @@
     </div>
   </header>
 
-  <section class="glass rounded-3xl p-5 mb-5">
+  <section id="market-panel" class="glass rounded-3xl p-5 mb-5">
     <div class="flex items-center justify-between gap-3 mb-4">
       <div><h2 class="font-bold text-lg">市場雷達</h2><p class="muted text-xs mt-1">大市回調程度 + 板塊相對強弱</p></div>
       <span id="market-date" class="text-xs muted"></span>
@@ -101,13 +254,13 @@
     </div>
   </section>
 
-  <main>
+  <main id="opportunities">
     <div class="flex items-end justify-between mb-3 px-1">
       <div><h2 id="section-title" class="text-xl font-black">MATCH · 接近完整形態</h2><p id="section-subtitle" class="muted text-xs mt-1">Stage 2 + Cup & Handle 條件大致齊全</p></div>
       <span id="shown-count" class="text-xs muted"></span>
     </div>
-    <div id="cards" class="space-y-3"></div>
-  </main>
+    <div class="workspace"><div class="workspace-list"><div id="cards"></div></div><aside id="workspace-detail" class="workspace-detail"><div class="detail-placeholder">SELECT A TICKER</div></aside></div>
+  </main><button id="market-toggle" class="market-toggle" type="button">▸ MARKET RADAR / SECTOR RELATIVE STRENGTH</button>
 
   <footer class="muted text-xs py-8 text-center">
     本工具只提供形態篩選參考，不構成投資建議。突破前仍應按策略肉眼審查形態、成交量及市場環境，並自行管理風險。
@@ -119,7 +272,7 @@ const CHECK_LABELS={
 "1_price_above_150_200":"股價 > 150/200MA","2_ma150_above_200":"150MA > 200MA","3_ma200_rising":"200MA 向上","4_ma50_above_150_200":"50MA > 150/200MA","5_price_above_50":"股價 > 50MA","6_within_25pct_of_52w_high":"距52週高 ≤25%","7_at_least_25pct_above_52w_low":"高於52週低 ≥25%","8_rs_above_70":"RS ≥70",
 "cup_depth_ok":"杯深度 12–40%","cup_length_ok":"杯長 1–6 個月","handle_length_ok":"柄長 1週–2個月","handle_shorter_than_cup":"柄短於杯身","handle_near_rim":"柄部貼近杯口","vcp_range_le_10":"VCP 波幅 ≤10%","higher_lows":"一底高過一底","no_lower_lows":"無一底低過一底","volume_dry_up":"量縮 VDU","not_too_sharp":"非急拉突破"
 };
-let results={},charts={},filterMode="match";
+let results={},charts={},filterMode="match",selectedSymbol=null,activeChart=null,tableSortKey=null,tableSortAsc=false;
 
 const fmt=n=>n==null?"—":Number(n).toLocaleString("en-US");
 const pct=n=>n==null?"—":(Number(n)>0?"+":"")+Number(n).toFixed(1)+"%";
@@ -139,9 +292,9 @@ async function init(){
  document.getElementById("watch-count").textContent=(results.watchlist||[]).length;
  document.getElementById("match-pill").textContent=(results.results||[]).length;
  document.getElementById("watch-pill").textContent=(results.watchlist||[]).length;
- renderMarket(results.market); renderCards();
+ renderMarket(results.market); renderCards(); document.getElementById("market-toggle").onclick=()=>document.getElementById("market-panel").classList.toggle("visible");
  document.querySelectorAll(".filter").forEach(b=>b.onclick=()=>{filterMode=b.dataset.filter;document.querySelectorAll(".filter").forEach(x=>x.classList.remove("active"));b.classList.add("active");renderCards()});
- document.getElementById("sort").onchange=renderCards;
+ document.getElementById("sort").onchange=()=>{tableSortKey=null;renderCards()};
  document.getElementById("copy-btn").onclick=copyAll;
 }
 function renderMarket(m){
@@ -161,12 +314,14 @@ function renderMarket(m){
 }
 function getList(){
  let list=filterMode==="match"?(results.results||[]):filterMode==="watch"?(results.watchlist||[]):allEntries();
- const mode=document.getElementById("sort").value;
+ const mode=tableSortKey||document.getElementById("sort").value;
  return [...list].sort((a,b)=>{
   const A=a.metrics||{},B=b.metrics||{},av=a.stage2?.values||{},bv=b.stage2?.values||{};
-  if(mode==="rs")return (bv.rs_rating||0)-(av.rs_rating||0);
-  if(mode==="pivot")return Math.abs(A.pct_to_pivot||0)-Math.abs(B.pct_to_pivot||0);
-  if(mode==="vcp")return (A.vcp_range_pct||99)-(B.vcp_range_pct||99);
+  if(mode==="symbol")return (tableSortAsc?1:-1)*String(a.symbol).localeCompare(String(b.symbol));
+  if(mode==="score")return (tableSortAsc?1:-1)*(Object.values(a.checks||{}).filter(Boolean).length-Object.values(b.checks||{}).filter(Boolean).length);
+  if(mode==="rs")return (tableSortAsc?1:-1)*((av.rs_rating??-1)-(bv.rs_rating??-1));
+  if(mode==="pivot")return (tableSortAsc?-1:1)*(Math.abs(A.pct_to_pivot??Infinity)-Math.abs(B.pct_to_pivot??Infinity));
+  if(mode==="vcp")return (tableSortAsc?-1:1)*((A.vcp_range_pct??Infinity)-(B.vcp_range_pct??Infinity));
   if(mode==="volume")return (b.avg_volume_63d||0)-(a.avg_volume_63d||0);
   return (A.cup_depth_pct||99)-(B.cup_depth_pct||99);
  });
@@ -201,16 +356,39 @@ function card(e){
  '<div><div id="chart-'+e.symbol+'" class="h-64 rounded-xl overflow-hidden"></div></div>'+
  '</div></details>';
 }
+function pivotClass(n){if(n==null||!Number.isFinite(Number(n)))return "pivot-unknown";return Math.abs(Number(n))<=3?"pivot-near":Number(n)>0?"pivot-above":"pivot-away";}
 function renderCards(){
- const list=getList(),cards=document.getElementById("cards");
+ const list=getList(),root=document.getElementById("cards");
  document.getElementById("shown-count").textContent=list.length+" 隻";
- const title=document.getElementById("section-title"),sub=document.getElementById("section-subtitle");
- if(filterMode==="match"){title.textContent="MATCH · 接近完整形態";sub.textContent="Stage 2 + Cup & Handle 條件大致齊全";}
- else if(filterMode==="watch"){title.textContent="WATCH · 等待改善";sub.textContent="已通過 Stage 2，但仍有形態條件未完全符合";}
- else{title.textContent="ALL · 全部候選";sub.textContent="MATCH + WATCH";}
- if(!list.length){cards.innerHTML='<div class="glass rounded-2xl p-10 text-center muted">目前沒有符合此篩選條件的股票。</div>';return;}
- cards.innerHTML=list.map(card).join("");
- list.forEach(e=>{if(charts[e.symbol])drawChart(e)});
+ document.getElementById("section-title").textContent=filterMode.toUpperCase()+" / OPPORTUNITIES";
+ document.getElementById("section-subtitle").textContent="Select a ticker to inspect the chart and pattern details";
+ if(!list.length){root.innerHTML='<div class="detail-placeholder">目前沒有符合條件的股票</div>';showDetail(null);return;}
+ if(!list.some(e=>e.symbol===selectedSymbol))selectedSymbol=list[0].symbol;
+ root.innerHTML='<div class="table-scroll"><table class="terminal-table"><thead><tr><th><button class="sort-head" data-sort="symbol">TICKER ↕</button></th><th>GRADE</th><th><button class="sort-head" data-sort="rs">RS ↕</button></th><th><button class="sort-head" data-sort="pivot">PIVOT Δ ↕</button></th><th><button class="sort-head" data-sort="vcp">VCP ↕</button></th><th><button class="sort-head" data-sort="score">SCORE ↕</button></th></tr></thead><tbody>'+list.map(e=>{
+ const m=e.metrics||{},v=e.stage2?.values||{},score=Object.values(e.checks||{}).filter(Boolean).length;
+ return '<tr data-symbol="'+e.symbol+'" class="'+(e.symbol===selectedSymbol?'selected':'')+'"><td><strong>'+e.symbol+'</strong><small>'+e.name+'</small></td><td><span class="grade '+(e.grade==="match"?'grade-match':'grade-watch')+'">'+e.grade.toUpperCase()+'</span></td><td>'+fmt(v.rs_rating)+'</td><td>'+pct(m.pct_to_pivot)+'</td><td>'+(m.vcp_range_pct==null?'—':Number(m.vcp_range_pct).toFixed(1)+'%')+'</td><td>'+score+'/10</td></tr>';
+ }).join('')+'</tbody></table></div>';
+ root.querySelectorAll('.sort-head').forEach(btn=>{btn.classList.toggle('sorted',tableSortKey===btn.dataset.sort);btn.onclick=()=>{const key=btn.dataset.sort;tableSortAsc=tableSortKey===key?!tableSortAsc:(key==="symbol");tableSortKey=key;renderCards()};});
+ root.querySelectorAll('tr[data-symbol]').forEach(tr=>tr.onclick=()=>{selectedSymbol=tr.dataset.symbol;root.querySelectorAll('tr[data-symbol]').forEach(x=>x.classList.toggle('selected',x===tr));showDetail(list.find(e=>e.symbol===selectedSymbol));});
+ showDetail(list.find(e=>e.symbol===selectedSymbol));
+}
+function showDetail(e){
+ const panel=document.getElementById("workspace-detail");
+ if(activeChart){activeChart.remove();activeChart=null;}
+ if(!e){panel.innerHTML='<div class="detail-placeholder">NO STOCKS TO DISPLAY</div>';return;}
+ const m=e.metrics||{},v=e.stage2?.values||{},score=Object.values(e.checks||{}).filter(Boolean).length;
+ panel.innerHTML='<div class="detail-top"><div><span class="eyebrow">SELECTED SETUP / '+e.grade.toUpperCase()+'</span><h2>'+e.symbol+' <span class="grade '+(e.grade==="match"?'grade-match':'grade-watch')+'">'+e.grade.toUpperCase()+'</span></h2><p>'+e.name+(e.sector?' · '+e.sector:'')+'</p></div><div class="score-large">'+score+'<small>/10</small></div></div><div class="chart-caption">DAILY PRICE ACTION <span>PIVOT / STOP / 1R</span></div><div id="selected-chart" class="selected-chart"></div><div class="detail-metrics">'+metric("PRICE",m.close)+metric("RS",v.rs_rating)+metric("PIVOT",m.pivot,pct(m.pct_to_pivot)+" to pivot")+metric("CUP DEPTH",m.cup_depth_pct+"%",m.cup_days+" days")+metric("HANDLE",m.handle_days+" days",m.handle_depth_pct+"% depth")+metric("VCP",m.vcp_range_pct+"%",m.vdu_ratio!=null?"VDU "+m.vdu_ratio:"")+'</div><details class="checks-detail"><summary>STAGE 2 & PATTERN CHECKS ▾</summary><div class="checks-grid"><div><h3>STAGE 2</h3>'+checklist(e.stage2?.checks)+'</div><div><h3>CUP / HANDLE / VCP</h3>'+checklist(e.checks)+'</div></div><p class="risk-info">STOP '+fmt(m.stop_loss)+' · TARGET 1R '+fmt(m.target_1r)+'</p></details>';
+ const d=charts[e.symbol],el=document.getElementById("selected-chart");
+ if(!d?.dates?.length){el.innerHTML='<div class="detail-placeholder">CHART DATA UNAVAILABLE</div>';return;}
+ try{
+ const chart=LightweightCharts.createChart(el,{height:330,layout:{background:{color:"#0c1726"},textColor:"#8295ad"},grid:{vertLines:{color:"#19283b"},horzLines:{color:"#19283b"}},rightPriceScale:{borderVisible:false},timeScale:{borderVisible:false}});activeChart=chart;
+ const candle=chart.addCandlestickSeries({upColor:"#35d399",downColor:"#fb7185",borderVisible:false,wickUpColor:"#35d399",wickDownColor:"#fb7185"});
+ candle.setData(d.dates.map((t,i)=>({time:t,open:d.open[i],high:d.high[i],low:d.low[i],close:d.close[i]})));
+ for(const [key,color,label] of [["pivot","#5ea7ff","Pivot"],["stop_loss","#fb7185","Stop"],["target_1r","#35d399","1R"]])if(m[key]!=null)candle.createPriceLine({price:m[key],color,lineWidth:1,lineStyle:2,axisLabelVisible:true,title:label});
+ chart.timeScale().fitContent();
+ const resize=()=>{if(activeChart===chart&&el.isConnected)chart.applyOptions({width:el.clientWidth})};
+ resize();
+ }catch(err){console.error(err);el.innerHTML='<div class="detail-placeholder">CHART RENDER ERROR</div>';}
 }
 function drawChart(e){
  const el=document.getElementById("chart-"+e.symbol);if(!el)return;
