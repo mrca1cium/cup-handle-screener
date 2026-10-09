@@ -67,6 +67,14 @@ def candidate_rows():
         min_market_cap=2_000_000_000,
     )
     cheap.sort(key=_rank, reverse=True)
+    # Diagnostic counts describe the live broad pool; snapshot membership stays frozen.
+    save_state(
+        universe_core_count=len(core),
+        universe_extra_count=len(extra),
+        universe_broad_count=len(rows),
+        universe_cheap_stats=_stats,
+        universe_stats_date=time.strftime("%Y-%m-%d", time.localtime()),
+    )
     log.info(
         "Broad=%d；cheap filter passed=%d（market cap >= $2B, price >= $10, current volume >= 50K）",
         len(rows),
@@ -185,8 +193,6 @@ def get_universe_snapshot(state: dict, current_symbols: List[str], current_rows=
     save_state(
         universe_symbols=snapshot,
         universe_rows=list(current_rows or []),
-        universe_core_count=len(current_rows or []),
-        universe_extra_count=0,
         universe_created_at=time.time(),
         universe_created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     )
