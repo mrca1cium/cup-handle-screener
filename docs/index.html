@@ -189,6 +189,12 @@ header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);bor
 .terminal-table th{position:sticky;top:0;z-index:2}
 .workspace-detail{position:sticky;top:12px}
 @media(max-width:1100px){.workspace-detail{position:static}}
+
+/* Market radar: accessible inline expander directly below header */
+#market-toggle{display:block;width:100%;margin:0 0 12px;text-align:left}
+#market-panel{margin-top:0}
+.metric-qualified{border-color:rgba(53,211,153,.45)!important;background:linear-gradient(135deg,rgba(33,112,87,.18),#142034)!important}
+.metric-qualified .metric-value,.value-qualified{color:#5ee0b6!important}
 </style>
 </head>
 <body>
@@ -222,6 +228,7 @@ header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);bor
     </div>
   </header>
 
+  <button id="market-toggle" class="market-toggle" type="button">▸ MARKET RADAR / SECTOR RELATIVE STRENGTH</button>
   <section id="market-panel" class="glass rounded-3xl p-5 mb-5">
     <div class="flex items-center justify-between gap-3 mb-4">
       <div><h2 class="font-bold text-lg">市場雷達</h2><p class="muted text-xs mt-1">大市回調程度 + 板塊相對強弱</p></div>
@@ -260,7 +267,7 @@ header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);bor
       <span id="shown-count" class="text-xs muted"></span>
     </div>
     <div class="workspace"><div class="workspace-list"><div id="cards"></div></div><aside id="workspace-detail" class="workspace-detail"><div class="detail-placeholder">SELECT A TICKER</div></aside></div>
-  </main><button id="market-toggle" class="market-toggle" type="button">▸ MARKET RADAR / SECTOR RELATIVE STRENGTH</button>
+  </main>
 
   <footer class="muted text-xs py-8 text-center">
     本工具只提供形態篩選參考，不構成投資建議。突破前仍應按策略肉眼審查形態、成交量及市場環境，並自行管理風險。
@@ -292,7 +299,7 @@ async function init(){
  document.getElementById("watch-count").textContent=(results.watchlist||[]).length;
  document.getElementById("match-pill").textContent=(results.results||[]).length;
  document.getElementById("watch-pill").textContent=(results.watchlist||[]).length;
- renderMarket(results.market); renderCards(); document.getElementById("market-toggle").onclick=()=>document.getElementById("market-panel").classList.toggle("visible");
+ renderMarket(results.market); renderCards(); document.getElementById("market-toggle").setAttribute("aria-expanded","false"); document.getElementById("market-toggle").setAttribute("aria-controls","market-panel"); document.getElementById("market-toggle").onclick=()=>{const p=document.getElementById("market-panel"),b=document.getElementById("market-toggle"),open=p.classList.toggle("visible");b.setAttribute("aria-expanded",String(open));b.textContent=(open?"▾":"▸")+" MARKET RADAR / SECTOR RELATIVE STRENGTH";};
  document.querySelectorAll(".filter").forEach(b=>b.onclick=()=>{filterMode=b.dataset.filter;document.querySelectorAll(".filter").forEach(x=>x.classList.remove("active"));b.classList.add("active");renderCards()});
  document.getElementById("sort").onchange=()=>{tableSortKey=null;renderCards()};
  document.getElementById("copy-btn").onclick=copyAll;
@@ -372,12 +379,14 @@ function renderCards(){
  root.querySelectorAll('tr[data-symbol]').forEach(tr=>tr.onclick=()=>{selectedSymbol=tr.dataset.symbol;root.querySelectorAll('tr[data-symbol]').forEach(x=>x.classList.toggle('selected',x===tr));showDetail(list.find(e=>e.symbol===selectedSymbol));});
  showDetail(list.find(e=>e.symbol===selectedSymbol));
 }
+function qualifyMetric(key,e){const c=e.checks||{},m=e.metrics||{},v=e.stage2?.values||{};switch(key){case "rs":return e.stage2?.checks?.["8_rs_above_70"]===true;case "pivot":return Number.isFinite(Number(m.pct_to_pivot))&&m.pct_to_pivot!=null&&Math.abs(Number(m.pct_to_pivot))<=3;case "vcp":return c.vcp_range_le_10===true;case "cup":return c.cup_depth_ok===true;case "handle":return c.handle_length_ok===true&&c.handle_near_rim===true&&c.handle_shorter_than_cup===true;default:return false;}}
+function qualifiedMetric(label,value,sub,key,e){return '<div class="metric '+(qualifyMetric(key,e)?'metric-qualified':'')+'"><div class="muted text-[10px]">'+label+'</div><div class="metric-value font-bold mt-1">'+value+'</div>'+(sub?'<div class="muted text-[10px] mt-0.5">'+sub+'</div>':'')+'</div>';}
 function showDetail(e){
  const panel=document.getElementById("workspace-detail");
  if(activeChart){activeChart.remove();activeChart=null;}
  if(!e){panel.innerHTML='<div class="detail-placeholder">NO STOCKS TO DISPLAY</div>';return;}
  const m=e.metrics||{},v=e.stage2?.values||{},score=Object.values(e.checks||{}).filter(Boolean).length;
- panel.innerHTML='<div class="detail-top"><div><span class="eyebrow">SELECTED SETUP / '+e.grade.toUpperCase()+'</span><h2>'+e.symbol+' <span class="grade '+(e.grade==="match"?'grade-match':'grade-watch')+'">'+e.grade.toUpperCase()+'</span></h2><p>'+e.name+(e.sector?' · '+e.sector:'')+'</p></div><div class="score-large">'+score+'<small>/10</small></div></div><div class="chart-caption">DAILY PRICE ACTION <span>PIVOT / STOP / 1R</span></div><div id="selected-chart" class="selected-chart"></div><div class="detail-metrics">'+metric("PRICE",m.close)+metric("RS",v.rs_rating)+metric("PIVOT",m.pivot,pct(m.pct_to_pivot)+" to pivot")+metric("CUP DEPTH",m.cup_depth_pct+"%",m.cup_days+" days")+metric("HANDLE",m.handle_days+" days",m.handle_depth_pct+"% depth")+metric("VCP",m.vcp_range_pct+"%",m.vdu_ratio!=null?"VDU "+m.vdu_ratio:"")+'</div><details class="checks-detail"><summary>STAGE 2 & PATTERN CHECKS ▾</summary><div class="checks-grid"><div><h3>STAGE 2</h3>'+checklist(e.stage2?.checks)+'</div><div><h3>CUP / HANDLE / VCP</h3>'+checklist(e.checks)+'</div></div><p class="risk-info">STOP '+fmt(m.stop_loss)+' · TARGET 1R '+fmt(m.target_1r)+'</p></details>';
+ panel.innerHTML='<div class="detail-top"><div><span class="eyebrow">SELECTED SETUP / '+e.grade.toUpperCase()+'</span><h2>'+e.symbol+' <span class="grade '+(e.grade==="match"?'grade-match':'grade-watch')+'">'+e.grade.toUpperCase()+'</span></h2><p>'+e.name+(e.sector?' · '+e.sector:'')+'</p></div><div class="score-large">'+score+'<small>/10</small></div></div><div class="chart-caption">DAILY PRICE ACTION <span>PIVOT / STOP / 1R</span></div><div id="selected-chart" class="selected-chart"></div><div class="detail-metrics">'+metric("PRICE",m.close)+qualifiedMetric("RS",v.rs_rating,"Stage 2 RS check","rs",e)+qualifiedMetric("PIVOT",m.pivot,pct(m.pct_to_pivot)+" to pivot · ±3% proximity","pivot",e)+qualifiedMetric("CUP DEPTH",m.cup_depth_pct+"%",m.cup_days+" days","cup",e)+qualifiedMetric("HANDLE",m.handle_days+" days",m.handle_depth_pct+"% depth","handle",e)+qualifiedMetric("VCP",m.vcp_range_pct+"%",m.vdu_ratio!=null?"VDU "+m.vdu_ratio:"","vcp",e)+'</div><details class="checks-detail"><summary>STAGE 2 & PATTERN CHECKS ▾</summary><div class="checks-grid"><div><h3>STAGE 2</h3>'+checklist(e.stage2?.checks)+'</div><div><h3>CUP / HANDLE / VCP</h3>'+checklist(e.checks)+'</div></div><p class="risk-info">STOP '+fmt(m.stop_loss)+' · TARGET 1R '+fmt(m.target_1r)+'</p></details>';
  const d=charts[e.symbol],el=document.getElementById("selected-chart");
  if(!d?.dates?.length){el.innerHTML='<div class="detail-placeholder">CHART DATA UNAVAILABLE</div>';return;}
  try{
