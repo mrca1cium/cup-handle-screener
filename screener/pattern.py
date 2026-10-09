@@ -8,6 +8,30 @@ from __future__ import annotations
 from .stage2 import sma
 
 
+def handle_contractions(high: list[float], low: list[float]) -> dict:
+    """Three chronological, non-overlapping handle segments.
+
+    This is a conservative *proxy* for VCP, not a swing-pivot detector.
+    Require at least 9 bars (3 per segment) and strictly decreasing
+    percentage high-low ranges across all three segments.
+    """
+    n = len(high)
+    if n != len(low) or n < 9:
+        return {"confirmed": False, "ranges_pct": []}
+    bounds = [0, n // 3, (2 * n) // 3, n]
+    ranges = []
+    for start, end in zip(bounds, bounds[1:]):
+        h = max(high[start:end])
+        l = min(low[start:end])
+        if h <= 0:
+            return {"confirmed": False, "ranges_pct": []}
+        ranges.append((h - l) / h * 100)
+    return {
+        "confirmed": ranges[0] > ranges[1] > ranges[2],
+        "ranges_pct": [round(v, 2) for v in ranges],
+    }
+
+
 def detect(d: dict) -> dict | None:
     high, low, close, vol, dates = d["high"], d["low"], d["close"], d["volume"], d["dates"]
     n = len(close)
@@ -60,6 +84,10 @@ def detect(d: dict) -> dict | None:
     vcp_high = max(high[n - vcp_win:])
     vcp_low = min(low[n - vcp_win:])
     vcp_range_pct = (vcp_high - vcp_low) / vcp_high * 100
+    contraction = handle_contractions(hh, ll)
+    # Keep the existing <=10% narrow-range gate, but additionally require
+    # progressive contraction rather than treating any tight range as VCP.
+    vcp_confirmed = vcp_range_pct <= 10 and contraction["confirmed"]
 
     # ---- 5. Higher Lows / Lower Lows（柄內分段比較）----
     seg = max(1, handle_days // 3)
@@ -93,7 +121,7 @@ def detect(d: dict) -> dict | None:
         "handle_length_ok": True,
         "handle_shorter_than_cup": True,
         "handle_near_rim": True,
-        "vcp_range_le_10": vcp_range_pct <= 10,
+        "vcp_range_le_10": vcp_confirmed,
         "higher_lows": higher_lows,
         "no_lower_lows": not lower_lows,
         "volume_dry_up": vdu,
@@ -125,6 +153,8 @@ def detect(d: dict) -> dict | None:
             "handle_low": round(handle_low, 2),
             "handle_depth_pct": round(handle_depth_pct, 1),
             "vcp_range_pct": round(vcp_range_pct, 1),
+            "vcp_contraction_confirmed": contraction["confirmed"],
+            "vcp_segment_ranges_pct": contraction["ranges_pct"],
             "vdu_ratio": round(avg3 / avg50, 3) if avg50 else None,
             "pivot": round(pivot, 2),
             "close": round(c, 2),
