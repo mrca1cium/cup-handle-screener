@@ -176,6 +176,19 @@ header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);bor
 .detail-metrics .metric{background:linear-gradient(130deg,#17253a,#142034);border-color:#33445e}
 .market-toggle{background:linear-gradient(90deg,#1b2640,#142238);border-color:#3e4568}
 .market-toggle:hover{border-color:#9483d0}
+
+/* Scanner usability refinement */
+.sort-head{display:inline-flex;align-items:center;gap:4px;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer}
+.sort-head:hover,.sort-head.sorted{color:#b6a6f6}
+.rs-cell{color:#7bd8ef;font-weight:750}
+.pivot-distance{display:inline-block;padding:4px 7px;border-radius:5px;font-weight:750;font-variant-numeric:tabular-nums}
+.pivot-near{background:rgba(43,185,145,.13);color:#5ee0b6}
+.pivot-above{background:rgba(245,196,81,.12);color:#f4c979}
+.pivot-away{background:rgba(101,156,208,.12);color:#a5c8f1}
+.pivot-unknown{color:#8899ad}
+.terminal-table th{position:sticky;top:0;z-index:2}
+.workspace-detail{position:sticky;top:12px}
+@media(max-width:1100px){.workspace-detail{position:static}}
 </style>
 </head>
 <body>
@@ -259,7 +272,7 @@ const CHECK_LABELS={
 "1_price_above_150_200":"股價 > 150/200MA","2_ma150_above_200":"150MA > 200MA","3_ma200_rising":"200MA 向上","4_ma50_above_150_200":"50MA > 150/200MA","5_price_above_50":"股價 > 50MA","6_within_25pct_of_52w_high":"距52週高 ≤25%","7_at_least_25pct_above_52w_low":"高於52週低 ≥25%","8_rs_above_70":"RS ≥70",
 "cup_depth_ok":"杯深度 12–40%","cup_length_ok":"杯長 1–6 個月","handle_length_ok":"柄長 1週–2個月","handle_shorter_than_cup":"柄短於杯身","handle_near_rim":"柄部貼近杯口","vcp_range_le_10":"VCP 波幅 ≤10%","higher_lows":"一底高過一底","no_lower_lows":"無一底低過一底","volume_dry_up":"量縮 VDU","not_too_sharp":"非急拉突破"
 };
-let results={},charts={},filterMode="match",selectedSymbol=null,activeChart=null;
+let results={},charts={},filterMode="match",selectedSymbol=null,activeChart=null,tableSortKey=null,tableSortAsc=false;
 
 const fmt=n=>n==null?"—":Number(n).toLocaleString("en-US");
 const pct=n=>n==null?"—":(Number(n)>0?"+":"")+Number(n).toFixed(1)+"%";
@@ -281,7 +294,7 @@ async function init(){
  document.getElementById("watch-pill").textContent=(results.watchlist||[]).length;
  renderMarket(results.market); renderCards(); document.getElementById("market-toggle").onclick=()=>document.getElementById("market-panel").classList.toggle("visible");
  document.querySelectorAll(".filter").forEach(b=>b.onclick=()=>{filterMode=b.dataset.filter;document.querySelectorAll(".filter").forEach(x=>x.classList.remove("active"));b.classList.add("active");renderCards()});
- document.getElementById("sort").onchange=renderCards;
+ document.getElementById("sort").onchange=()=>{tableSortKey=null;renderCards()};
  document.getElementById("copy-btn").onclick=copyAll;
 }
 function renderMarket(m){
@@ -301,12 +314,14 @@ function renderMarket(m){
 }
 function getList(){
  let list=filterMode==="match"?(results.results||[]):filterMode==="watch"?(results.watchlist||[]):allEntries();
- const mode=document.getElementById("sort").value;
+ const mode=tableSortKey||document.getElementById("sort").value;
  return [...list].sort((a,b)=>{
   const A=a.metrics||{},B=b.metrics||{},av=a.stage2?.values||{},bv=b.stage2?.values||{};
-  if(mode==="rs")return (bv.rs_rating||0)-(av.rs_rating||0);
-  if(mode==="pivot")return Math.abs(A.pct_to_pivot||0)-Math.abs(B.pct_to_pivot||0);
-  if(mode==="vcp")return (A.vcp_range_pct||99)-(B.vcp_range_pct||99);
+  if(mode==="symbol")return (tableSortAsc?1:-1)*String(a.symbol).localeCompare(String(b.symbol));
+  if(mode==="score")return (tableSortAsc?1:-1)*(Object.values(a.checks||{}).filter(Boolean).length-Object.values(b.checks||{}).filter(Boolean).length);
+  if(mode==="rs")return (tableSortAsc?1:-1)*((av.rs_rating??-1)-(bv.rs_rating??-1));
+  if(mode==="pivot")return (tableSortAsc?-1:1)*(Math.abs(A.pct_to_pivot??Infinity)-Math.abs(B.pct_to_pivot??Infinity));
+  if(mode==="vcp")return (tableSortAsc?-1:1)*((A.vcp_range_pct??Infinity)-(B.vcp_range_pct??Infinity));
   if(mode==="volume")return (b.avg_volume_63d||0)-(a.avg_volume_63d||0);
   return (A.cup_depth_pct||99)-(B.cup_depth_pct||99);
  });
@@ -341,6 +356,7 @@ function card(e){
  '<div><div id="chart-'+e.symbol+'" class="h-64 rounded-xl overflow-hidden"></div></div>'+
  '</div></details>';
 }
+function pivotClass(n){if(n==null||!Number.isFinite(Number(n)))return "pivot-unknown";return Math.abs(Number(n))<=3?"pivot-near":Number(n)>0?"pivot-above":"pivot-away";}
 function renderCards(){
  const list=getList(),root=document.getElementById("cards");
  document.getElementById("shown-count").textContent=list.length+" 隻";
@@ -348,10 +364,11 @@ function renderCards(){
  document.getElementById("section-subtitle").textContent="Select a ticker to inspect the chart and pattern details";
  if(!list.length){root.innerHTML='<div class="detail-placeholder">目前沒有符合條件的股票</div>';showDetail(null);return;}
  if(!list.some(e=>e.symbol===selectedSymbol))selectedSymbol=list[0].symbol;
- root.innerHTML='<div class="table-scroll"><table class="terminal-table"><thead><tr><th>TICKER</th><th>GRADE</th><th>RS</th><th>PIVOT Δ</th><th>VCP</th><th>SCORE</th></tr></thead><tbody>'+list.map(e=>{
+ root.innerHTML='<div class="table-scroll"><table class="terminal-table"><thead><tr><th><button class="sort-head" data-sort="symbol">TICKER ↕</button></th><th>GRADE</th><th><button class="sort-head" data-sort="rs">RS ↕</button></th><th><button class="sort-head" data-sort="pivot">PIVOT Δ ↕</button></th><th><button class="sort-head" data-sort="vcp">VCP ↕</button></th><th><button class="sort-head" data-sort="score">SCORE ↕</button></th></tr></thead><tbody>'+list.map(e=>{
  const m=e.metrics||{},v=e.stage2?.values||{},score=Object.values(e.checks||{}).filter(Boolean).length;
  return '<tr data-symbol="'+e.symbol+'" class="'+(e.symbol===selectedSymbol?'selected':'')+'"><td><strong>'+e.symbol+'</strong><small>'+e.name+'</small></td><td><span class="grade '+(e.grade==="match"?'grade-match':'grade-watch')+'">'+e.grade.toUpperCase()+'</span></td><td>'+fmt(v.rs_rating)+'</td><td>'+pct(m.pct_to_pivot)+'</td><td>'+(m.vcp_range_pct==null?'—':Number(m.vcp_range_pct).toFixed(1)+'%')+'</td><td>'+score+'/10</td></tr>';
  }).join('')+'</tbody></table></div>';
+ root.querySelectorAll('.sort-head').forEach(btn=>{btn.classList.toggle('sorted',tableSortKey===btn.dataset.sort);btn.onclick=()=>{const key=btn.dataset.sort;tableSortAsc=tableSortKey===key?!tableSortAsc:(key==="symbol");tableSortKey=key;renderCards()};});
  root.querySelectorAll('tr[data-symbol]').forEach(tr=>tr.onclick=()=>{selectedSymbol=tr.dataset.symbol;root.querySelectorAll('tr[data-symbol]').forEach(x=>x.classList.toggle('selected',x===tr));showDetail(list.find(e=>e.symbol===selectedSymbol));});
  showDetail(list.find(e=>e.symbol===selectedSymbol));
 }
@@ -369,6 +386,8 @@ function showDetail(e){
  candle.setData(d.dates.map((t,i)=>({time:t,open:d.open[i],high:d.high[i],low:d.low[i],close:d.close[i]})));
  for(const [key,color,label] of [["pivot","#5ea7ff","Pivot"],["stop_loss","#fb7185","Stop"],["target_1r","#35d399","1R"]])if(m[key]!=null)candle.createPriceLine({price:m[key],color,lineWidth:1,lineStyle:2,axisLabelVisible:true,title:label});
  chart.timeScale().fitContent();
+ const resize=()=>{if(activeChart===chart&&el.isConnected)chart.applyOptions({width:el.clientWidth})};
+ resize();
  }catch(err){console.error(err);el.innerHTML='<div class="detail-placeholder">CHART RENDER ERROR</div>';}
 }
 function drawChart(e){
