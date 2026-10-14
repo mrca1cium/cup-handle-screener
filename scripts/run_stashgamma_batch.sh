@@ -106,13 +106,14 @@ if [ "$STATUS" -ne 2 ]; then
 
   if [ "$BUILD_STATUS" -ne 0 ]; then
     echo "Website build failed with status $BUILD_STATUS" >&2
+    exit "$BUILD_STATUS"
   else
     /usr/bin/git add docs/data/results.json docs/data/charts.json
     if ! /usr/bin/git diff --cached --quiet; then
       /usr/bin/git config user.name "mrca1cium"
       /usr/bin/git config user.email "mr.calcium@gmail.com"
       /usr/bin/git commit -m "scan: update website from local cache"
-      /usr/bin/git push
+      /usr/bin/git push origin main
     fi
   fi
 fi
