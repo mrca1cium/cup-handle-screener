@@ -195,10 +195,12 @@ header .stat:nth-child(4){background:linear-gradient(125deg,#382d1f,#1b2637);bor
 #market-panel{margin-top:0}
 .metric-qualified{border-color:rgba(53,211,153,.45)!important;background:linear-gradient(135deg,rgba(33,112,87,.18),#142034)!important}
 .metric-qualified .metric-value,.value-qualified{color:#5ee0b6!important}
+.freshness-warning:not([hidden]){display:block;margin-bottom:14px;padding:12px 15px;background:#3b2b1d;border:1px solid #b58b45;border-radius:10px;color:#ffd991;font-size:12px;font-weight:700;letter-spacing:.02em}
 </style>
 </head>
 <body>
 <div class="shell">
+  <div id="freshness-warning" class="freshness-warning" role="status" hidden></div>
   <header class="glass rounded-3xl p-6 md:p-7 mb-5">
     <div class="hero-grid grid md:grid-cols-[1fr_auto] gap-6 items-start">
       <div>
@@ -291,6 +293,12 @@ async function init(){
   fetch("data/charts.json").then(r=>r.json())
  ]);
  document.getElementById("gen-date").textContent=results.generated_at||"—";
+ const dateStr=results.generated_at;
+ const ageDays=dateStr?Math.floor((Date.now()-new Date(dateStr+"T23:59:59Z").getTime())/86400000):Infinity;
+ const stale=ageDays>3;
+ const banner=document.getElementById("freshness-warning");
+ banner.hidden=!stale;
+ if(stale)banner.textContent="⚠ DATA MAY BE STALE — Last market data: "+(dateStr||"unknown")+". Verify prices and setups before trading.";
  document.getElementById("market-date").textContent=results.market?.date||"";
  document.getElementById("total").textContent=fmt(results.total_scanned);
  const u=results.universe_stats||{};
