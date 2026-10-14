@@ -31,6 +31,12 @@ source "$STASHGAMMA_ENV_FILE"
 source "$TWELVEDATA_ENV_FILE"
 cd "$ROOT"
 
+# Never commit generated website data on a preview or detached branch.
+if [ "$(/usr/bin/git branch --show-current)" != "main" ]; then
+  echo "Website update requires local main branch; run git switch main first." >&2
+  exit 1
+fi
+
 # launchd uses RunAtLoad as a startup/catch-up trigger. Work out the most
 # recent scheduled slot (01:00 or 13:00) and run only if that slot has not
 # already been handled. This makes startup catch-up persistent across a full
@@ -113,6 +119,7 @@ if [ "$STATUS" -ne 2 ]; then
       /usr/bin/git config user.name "mrca1cium"
       /usr/bin/git config user.email "mr.calcium@gmail.com"
       /usr/bin/git commit -m "scan: update website from local cache"
+      /usr/bin/git pull --rebase origin main
       /usr/bin/git push origin main
     fi
   fi
