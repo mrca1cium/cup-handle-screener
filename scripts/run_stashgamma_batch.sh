@@ -119,8 +119,27 @@ if [ "$STATUS" -ne 2 ]; then
       /usr/bin/git config user.name "mrca1cium"
       /usr/bin/git config user.email "mr.calcium@gmail.com"
       /usr/bin/git commit -m "scan: update website from local cache"
+      # Ignore unrelated local modifications (such as tracked .DS_Store).
+      # Only the generated website JSON files are staged by this runner.
+      # Stash unrelated tracked edits temporarily, retaining untracked files.
+      STASH_BEFORE=$(/usr/bin/git rev-parse -q --verify refs/stash || true)
+      /usr/bin/git stash push --keep-index -m "screener-auto-publish-local-edits"
+      STASH_AFTER=$(/usr/bin/git rev-parse -q --verify refs/stash || true)
+      if [ "$STASH_AFTER" != "$STASH_BEFORE" ] && [ -n "$STASH_AFTER" ]; then
+        RESTORE_STASH=1
+      else
+        RESTORE_STASH=0
+      fi
+      restore_local_changes() {
+        if [ "$RESTORE_STASH" -eq 1 ]; then
+          /usr/bin/git stash pop --index || echo "WARNING: restore local edits from git stash list manually" >&2
+        fi
+      }
+      trap restore_local_changes EXIT
       /usr/bin/git pull --rebase origin main
       /usr/bin/git push origin main
+      restore_local_changes
+      trap - EXIT
     fi
   fi
 fi
