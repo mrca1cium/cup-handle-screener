@@ -14,7 +14,7 @@ permissions:
 jobs:
   unittest:
     name: Offline unit tests (Python 3.9)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
