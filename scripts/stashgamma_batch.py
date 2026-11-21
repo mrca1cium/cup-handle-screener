@@ -484,6 +484,9 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
                     last_twelvedata_request_credits,
                     last_twelvedata_credits_left,
                 ) = data_mod.get_twelvedata_credit_state()
+                if (last_twelvedata_request_credits is None
+                        or last_twelvedata_request_credits > 8):
+                    observed_credit_weight_unsafe = True
                 log.info(
                     "Twelve Data usage after unavailable: request_weight=%s credits_left=%s",
                     last_twelvedata_request_credits
