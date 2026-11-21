@@ -70,18 +70,25 @@ class CandidatePriorityTests(unittest.TestCase):
 
     def test_credit_reservations_accumulate(self):
         now = 1795266000
-        ledger = None
+        ledger = {"window_start": now, "credits": 0}
         for i in range(3):
             ledger = reserve_credit(ledger, now, 24)
             self.assertEqual(ledger["credits"], (i + 1) * 8)
         self.assertIsNone(reserve_credit(ledger, now, 24))
         self.assertEqual(credit_remaining(ledger, now, 24), 0)
 
-    def test_credit_ledger_resets_utc_day(self):
+    def test_credit_ledger_rolling_window(self):
         now = 1795266000
-        ledger = reserve_credit(None, now, 8)
-        self.assertEqual(credit_remaining(ledger, now, 8), 0)
+        ledger = reserve_credit({"window_start": now, "credits": 0}, now, 8)
+        self.assertEqual(credit_remaining(ledger, now + 86399, 8), 0)
         self.assertEqual(credit_remaining(ledger, now + 86400, 8), 1)
+
+    def test_missing_or_invalid_ledger_fails_closed(self):
+        now = 1795266000
+        self.assertEqual(credit_remaining(None, now, 320), 0)
+        self.assertIsNone(reserve_credit(None, now, 320))
+        self.assertEqual(credit_remaining({"date": "2026-11-21", "credits": 0}, now, 320), 0)
+        self.assertEqual(credit_remaining({"window_start": now + 60, "credits": 0}, now, 320), 0)
 
     def test_synthetic_1959_stock_candidate_coverage(self):
         # Synthetic stress test, not a measurement of the user's real cache.
