@@ -205,6 +205,7 @@ def main() -> int:
     charts = {}
     stage2_pass = 0
     pattern_candidates = 0
+    refresh_priority = []
 
     for symbol, row, d in candidates:
         rating = ratings.get(symbol)
@@ -215,6 +216,8 @@ def main() -> int:
         if not s2["pass"]:
             continue
         stage2_pass += 1
+        if rating >= 80:
+            refresh_priority.append(symbol)
 
         pat = pattern.detect(d)
         if not pat:
@@ -301,6 +304,7 @@ def main() -> int:
         "market": market,
         "universe_stats": universe_stats,
         "total_scanned": len(candidates),
+        "refresh_priority": sorted(refresh_priority),
         "results": results,
         "watchlist": watchlist,
     }
