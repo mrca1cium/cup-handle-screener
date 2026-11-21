@@ -280,6 +280,7 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         previous.get("generated_at") if isinstance(previous, dict) else None,
     )
     important = priority_symbols(previous, symbols) | historical_priority(history, symbols)
+    p2 = {str(x).upper() for x in (previous.get("refresh_priority") or [])} & set(symbols)
     spy_meta = load_cache_meta("SPY")
     target_date = last_bar_date(spy_meta) if spy_meta else None
     jobs = []
@@ -310,7 +311,7 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         last = last_bar_date(meta) if meta else None
         age = (time.time() - time.mktime(time.strptime(last, "%Y-%m-%d"))) / 86400 if last else 9999
         jobs.append({"symbol": symbol, "provider": provider,
-                     "tier": 1 if is_priority else (2 if meta is None else 3),
+                     "tier": 1 if is_priority else (2 if upper in p2 or meta is None else 3),
                      "age_days": max(0, age)})
 
     # Fixed per-run request ceiling. Twelve Data daily credits remain
