@@ -21,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from screener import data as data_mod  # noqa: E402
-from scripts.candidate_priority import (eligible_for_refresh, last_bar_date, priority_symbols, schedule, update_candidate_history, historical_priority, select_provider_jobs)  # noqa: E402
+from scripts.candidate_priority import (eligible_for_refresh, last_bar_date, priority_symbols, schedule, update_candidate_history, historical_priority, select_provider_jobs, credit_remaining, reserve_credit)  # noqa: E402
 from screener.universe import get_broad_market  # noqa: E402
 from screener.market import SECTORS, INDICES  # noqa: E402
 from screener.main import _cheap_filter, _rank  # noqa: E402
@@ -319,8 +319,11 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     # Fill spare slots if a provider's allowance excludes queued symbols.
     remainder = [j for j in schedule(jobs, len(jobs), 0) if j["symbol"] not in
                  {q["symbol"] for q in queued}]
+    td_remaining = credit_remaining(
+        state.get("twelvedata_daily_ledger"), now, TWELVEDATA_DAILY_BUDGET,
+    )
     selected_jobs = select_provider_jobs(
-        queued + remainder, max_requests, TWELVEDATA_DAILY_BUDGET,
+        queued + remainder, max_requests, td_remaining,
     )
     selected = [j["symbol"] for j in selected_jobs]
     provider_by_symbol = {j["symbol"]: j["provider"] for j in selected_jobs}
@@ -364,6 +367,17 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         # intentionally conservative because there is no reset timestamp in
         # the response headers.
         if provider == "twelvedata":
+            # Reserve estimated credits persistently *before* making a request.
+            # This covers sequential Mac scheduler runs and failed requests.
+            current_state = load_state()
+            reserved = reserve_credit(
+                current_state.get("twelvedata_daily_ledger"),
+                time.time(), TWELVEDATA_DAILY_BUDGET,
+            )
+            if reserved is None:
+                log.warning("Twelve Data daily credit ledger exhausted; stop batch")
+                break
+            save_state(twelvedata_daily_ledger=reserved)
             if (
                 last_twelvedata_credits_left is not None
                 and last_twelvedata_credits_left < TWELVEDATA_SAFE_MIN_LEFT
