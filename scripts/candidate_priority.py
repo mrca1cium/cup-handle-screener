@@ -112,23 +112,34 @@ def select_provider_jobs(jobs, max_requests, twelvedata_remaining):
 TWELVEDATA_RESERVE_CREDITS = 8
 
 
-def utc_credit_day(timestamp):
-    return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).date().isoformat()
-
-
 def credit_remaining(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
-    """Remaining safe call count, never carrying yesterday's usage forward."""
-    day = utc_credit_day(now)
-    used = max(0, int((ledger or {}).get("credits", 0))) if (ledger or {}).get("date") == day else 0
+    """Fail closed without initialized ledger; use a conservative rolling 24h window.
+
+    A rolling window avoids assuming the provider's daily reset timezone.
+    An operator must seed a verified baseline before any Twelve Data requests.
+    """
     if reserve <= 0:
         raise ValueError("reserve must be positive")
-    return max(0, (max(0, daily_budget - used)) // reserve)
+    if not isinstance(ledger, dict):
+        return 0
+    try:
+        start = float(ledger["window_start"])
+        used = int(ledger["credits"])
+        if start > now or used < 0 or now - start < 0:
+            return 0
+        if now - start >= 86400:
+            # A new window is safe only if no other external consumers exist.
+            return max(0, int(daily_budget) // reserve)
+        return max(0, (int(daily_budget) - used) // reserve)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return 0
 
 
 def reserve_credit(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
-    """Return updated ledger or None if no safe allowance remains."""
+    """Reserve before request; never refund failures or unobserved responses."""
     if credit_remaining(ledger, now, daily_budget, reserve) <= 0:
         return None
-    day = utc_credit_day(now)
-    used = int((ledger or {}).get("credits", 0)) if (ledger or {}).get("date") == day else 0
-    return {"date": day, "credits": used + reserve}
+    start = float(ledger["window_start"])
+    if now - start >= 86400:
+        return {"window_start": now, "credits": reserve}
+    return {"window_start": start, "credits": int(ledger["credits"]) + reserve}
