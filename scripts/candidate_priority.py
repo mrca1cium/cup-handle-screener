@@ -49,8 +49,16 @@ def update_candidate_history(history, previous, snapshot, as_of_date, max_sessio
     result = {str(k): [s for s in v if s in allowed] for k, v in (history or {}).items()
               if isinstance(v, list)}
     if as_of_date:
-        current = priority_symbols(previous, snapshot)
-        result[as_of_date] = sorted(set(result.get(as_of_date, [])) | current)
+        # Normalize timestamps to the market session date; do not create a new
+        # history entry for every intraday rebuild of the same trading day.
+        session = str(as_of_date)[:10]
+        try:
+            datetime.date.fromisoformat(session)
+        except ValueError:
+            session = None
+        if session:
+            current = priority_symbols(previous, snapshot)
+            result[session] = sorted(set(result.get(session, [])) | current)
     return dict(sorted(result.items(), reverse=True)[:max_sessions])
 
 
