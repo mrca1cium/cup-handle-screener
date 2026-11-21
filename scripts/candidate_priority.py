@@ -98,3 +98,27 @@ def select_provider_jobs(jobs, max_requests, twelvedata_remaining):
             td += 1
         result.append(job)
     return result
+
+# Pessimistic credit accounting: reserve before sending an API call.
+# A reserved credit is never refunded on network failures or unknown responses.
+TWELVEDATA_RESERVE_CREDITS = 2
+
+
+def utc_credit_day(timestamp):
+    return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).date().isoformat()
+
+
+def credit_remaining(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
+    """Remaining safe call count, never carrying yesterday's usage forward."""
+    day = utc_credit_day(now)
+    used = int((ledger or {}).get("credits", 0)) if (ledger or {}).get("date") == day else 0
+    return max(0, (max(0, daily_budget - used)) // reserve)
+
+
+def reserve_credit(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
+    """Return updated ledger or None if no safe allowance remains."""
+    if credit_remaining(ledger, now, daily_budget, reserve) <= 0:
+        return None
+    day = utc_credit_day(now)
+    used = int((ledger or {}).get("credits", 0)) if (ledger or {}).get("date") == day else 0
+    return {"date": day, "credits": used + reserve}
