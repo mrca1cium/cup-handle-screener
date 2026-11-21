@@ -1,7 +1,8 @@
 """Offline regression tests for candidate-first scheduling."""
 import unittest
 from scripts.candidate_priority import (
-    eligible_for_refresh, last_bar_date, priority_symbols, schedule,\n    update_candidate_history, historical_priority, select_provider_jobs,
+    eligible_for_refresh, last_bar_date, priority_symbols, schedule,
+    update_candidate_history, historical_priority, select_provider_jobs,
 )
 
 
