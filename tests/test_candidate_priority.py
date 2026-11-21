@@ -72,16 +72,16 @@ class CandidatePriorityTests(unittest.TestCase):
         now = 1795266000
         ledger = None
         for i in range(3):
-            ledger = reserve_credit(ledger, now, 6)
-            self.assertEqual(ledger["credits"], (i + 1) * 2)
-        self.assertIsNone(reserve_credit(ledger, now, 6))
-        self.assertEqual(credit_remaining(ledger, now, 6), 0)
+            ledger = reserve_credit(ledger, now, 24)
+            self.assertEqual(ledger["credits"], (i + 1) * 8)
+        self.assertIsNone(reserve_credit(ledger, now, 24))
+        self.assertEqual(credit_remaining(ledger, now, 24), 0)
 
     def test_credit_ledger_resets_utc_day(self):
         now = 1795266000
-        ledger = reserve_credit(None, now, 2)
-        self.assertEqual(credit_remaining(ledger, now, 2), 0)
-        self.assertEqual(credit_remaining(ledger, now + 86400, 2), 1)
+        ledger = reserve_credit(None, now, 8)
+        self.assertEqual(credit_remaining(ledger, now, 8), 0)
+        self.assertEqual(credit_remaining(ledger, now + 86400, 8), 1)
 
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])
