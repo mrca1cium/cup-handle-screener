@@ -83,6 +83,24 @@ class CandidatePriorityTests(unittest.TestCase):
         self.assertEqual(credit_remaining(ledger, now, 8), 0)
         self.assertEqual(credit_remaining(ledger, now + 86400, 8), 1)
 
+    def test_synthetic_1959_stock_candidate_coverage(self):
+        # Synthetic stress test, not a measurement of the user's real cache.
+        jobs = [{"symbol": "P%04d" % i, "provider": "stashgamma",
+                 "tier": 1, "age_days": 5} for i in range(28)]
+        jobs += [{"symbol": "G%04d" % i, "provider": "stashgamma",
+                  "tier": 3, "age_days": 10} for i in range(1931)]
+        chosen = schedule(jobs, 250)
+        self.assertEqual(len(chosen), 250)
+        self.assertTrue({"P%04d" % i for i in range(28)}.issubset(
+            {j["symbol"] for j in chosen}))
+        self.assertGreaterEqual(sum(j["tier"] == 3 for j in chosen), 50)
+
+    def test_history_timestamp_normalized(self):
+        history = update_candidate_history(
+            {}, {"results": [{"symbol": "ABC"}]}, ["ABC"],
+            "2026-11-20T19:30:00Z")
+        self.assertEqual(list(history), ["2026-11-20"])
+
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])
 
