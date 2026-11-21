@@ -20,6 +20,7 @@ sys.path.insert(0, ROOT)
 
 from screener import data as data_mod
 from screener import pattern, stage2
+from screener.freshness import latest_session, last_bar
 from screener.main import _cheap_filter
 from screener.market import INDICES, SECTORS, sector_tag
 from screener.universe import get_broad_market
@@ -205,6 +206,10 @@ def main() -> int:
     charts = {}
     stage2_pass = 0
     pattern_candidates = 0
+    # Refresh-only hints include stale caches; they never alter MATCH/WATCH scoring.
+    refresh_priority = [symbol for symbol in snapshot if symbol in all_data
+                        and ratings.get(symbol, 0) >= 80
+                        and stage2.check_stage2(all_data[symbol], ratings[symbol])["pass"]]
 
     for symbol, row, d in candidates:
         rating = ratings.get(symbol)
@@ -228,6 +233,7 @@ def main() -> int:
             "sector_strength": sector_tag(row["sector"], rel_map),
             "avg_volume_63d": row["avg_volume_63d"],
             "market_cap": row.get("market_cap"),
+            "data_date": last_bar(d),
             "stage2": s2,
             **{k: v for k, v in pat.items() if k != "chart_start"},
         }
@@ -296,11 +302,36 @@ def main() -> int:
         "cache_insufficient": len(insufficient_map.keys() & snapshot_set),
     }
 
+    expected = latest_session()
+    diagnostics = state.get("data_diagnostics") or {}
+    data_status = {}
+    for symbol in snapshot:
+        d = all_data.get(symbol)
+        date = last_bar(d)
+        attempt = diagnostics.get(symbol, {})
+        if date == expected:
+            status = "CURRENT"
+        elif attempt.get("status") == "API_FAILED":
+            status = "API_FAILED"
+        elif not d and symbol in insufficient_map:
+            status = "INSUFFICIENT"
+        elif not d and symbol in unavailable:
+            status = "UNAVAILABLE"
+        elif not d:
+            status = "MISSING"
+        else:
+            status = "STALE"
+        data_status[symbol] = {"status": status, "data_date": date,
+                               "last_attempt_status": attempt.get("status")}
+
     output = {
+        "expected_session": expected,
+        "data_status": data_status,
         "generated_at": generated_at,
         "market": market,
         "universe_stats": universe_stats,
         "total_scanned": len(candidates),
+        "refresh_priority": sorted(refresh_priority),
         "results": results,
         "watchlist": watchlist,
     }
