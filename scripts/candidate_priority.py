@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 
 MIN_RECHECK_SECONDS = 12 * 3600
+HISTORY_TRADING_DAYS = 20
 RESERVE_GENERAL_FRACTION = 0.20
 
 
@@ -42,6 +43,23 @@ def priority_symbols(previous, snapshot):
     return selected
 
 
+def update_candidate_history(history, previous, snapshot, as_of_date, max_sessions=HISTORY_TRADING_DAYS):
+    """Maintain a bounded, date-keyed set of former MATCH/WATCH symbols."""
+    allowed = {str(s).upper() for s in snapshot}
+    result = {str(k): [s for s in v if s in allowed] for k, v in (history or {}).items()
+              if isinstance(v, list)}
+    if as_of_date:
+        current = priority_symbols(previous, snapshot)
+        result[as_of_date] = sorted(set(result.get(as_of_date, [])) | current)
+    return dict(sorted(result.items(), reverse=True)[:max_sessions])
+
+
+def historical_priority(history, snapshot):
+    allowed = {str(s).upper() for s in snapshot}
+    return {str(s).upper() for symbols in (history or {}).values()
+            if isinstance(symbols, list) for s in symbols if str(s).upper() in allowed}
+
+
 def schedule(jobs, max_requests, reserve_general_fraction=RESERVE_GENERAL_FRACTION):
     """jobs: iterable of dicts with symbol, tier (0..3), provider, age_days.
 
@@ -65,3 +83,18 @@ def schedule(jobs, max_requests, reserve_general_fraction=RESERVE_GENERAL_FRACTI
     chosen_general = general[:remaining]
     leftover = max_requests - len(first) - len(chosen_general)
     return first + chosen_general + high[len(first):len(first) + leftover]
+
+
+def select_provider_jobs(jobs, max_requests, twelvedata_remaining):
+    """Backfill skipped provider jobs without exceeding either request limit."""
+    result = []
+    td = 0
+    for job in jobs:
+        if len(result) >= max_requests:
+            break
+        if job["provider"] == "twelvedata":
+            if td >= max(0, twelvedata_remaining):
+                continue
+            td += 1
+        result.append(job)
+    return result
