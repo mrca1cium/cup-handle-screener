@@ -21,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from screener import data as data_mod  # noqa: E402
-from scripts.candidate_priority import (eligible_for_refresh, last_bar_date, priority_symbols, schedule)  # noqa: E402
+from scripts.candidate_priority import (eligible_for_refresh, last_bar_date, priority_symbols, schedule, update_candidate_history, historical_priority, select_provider_jobs)  # noqa: E402
 from screener.universe import get_broad_market  # noqa: E402
 from screener.market import SECTORS, INDICES  # noqa: E402
 from screener.main import _cheap_filter, _rank  # noqa: E402
@@ -273,7 +273,13 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
             previous = json.load(f)
     except (OSError, ValueError):
         pass
-    important = priority_symbols(previous, symbols)
+    # Keep a bounded trading-session history; only the branch implementation
+    # writes this state if explicitly deployed after review.
+    history = update_candidate_history(
+        state.get("candidate_history"), previous, symbols,
+        previous.get("generated_at") if isinstance(previous, dict) else None,
+    )
+    important = priority_symbols(previous, symbols) | historical_priority(history, symbols)
     spy_meta = load_cache_meta("SPY")
     target_date = last_bar_date(spy_meta) if spy_meta else None
     jobs = []
@@ -310,14 +316,12 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     # Fixed per-run request ceiling. Twelve Data daily credits remain
     # separately capped; never bypass the provider's own 429 protection.
     queued = schedule(jobs, max_requests)
-    td_count = 0
-    selected_jobs = []
-    for job in queued:
-        if job["provider"] == "twelvedata":
-            if td_count >= TWELVEDATA_DAILY_BUDGET:
-                continue
-            td_count += 1
-        selected_jobs.append(job)
+    # Fill spare slots if a provider's allowance excludes queued symbols.
+    remainder = [j for j in schedule(jobs, len(jobs), 0) if j["symbol"] not in
+                 {q["symbol"] for q in queued}]
+    selected_jobs = select_provider_jobs(
+        queued + remainder, max_requests, TWELVEDATA_DAILY_BUDGET,
+    )
     selected = [j["symbol"] for j in selected_jobs]
     provider_by_symbol = {j["symbol"]: j["provider"] for j in selected_jobs}
     selected_provider = "candidate-first"
@@ -505,6 +509,7 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         refresh_market_cache()
 
     save_state(
+        candidate_history=history,
         insufficient_symbols=persistent_insufficient,
         last_run_at=time.time(),
         last_run_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
