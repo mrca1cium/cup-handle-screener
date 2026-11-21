@@ -290,6 +290,9 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
     skipped_insufficient = 0
     for symbol in symbols:
         upper = symbol.upper()
+        if observed_credit_weight_unsafe:
+            log.error("Observed Twelve Data request weight exceeds reserved credits; halt further requests")
+            break
         meta = load_cache_meta(symbol)
         if upper in insufficient:
             skipped_insufficient += 1
@@ -355,6 +358,7 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
     last_twelvedata_request_credits = None
     last_twelvedata_credits_left = None
 
+    observed_credit_weight_unsafe = False
     for index, symbol in enumerate(selected, 1):
         meta = load_cache_meta(symbol)
         refresh = meta is not None
@@ -450,6 +454,12 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
                         if last_twelvedata_credits_left is not None
                         else "?",
                     )
+                if provider == "twelvedata" and (
+                    last_twelvedata_request_credits is None
+                    or last_twelvedata_request_credits > 8
+                ):
+                    observed_credit_weight_unsafe = True
+                    log.error("Twelve Data request credit weight missing or exceeds eight; fail closed")
                 success += 1
                 state = load_state()
                 insufficient_map = get_insufficient_map(state)
