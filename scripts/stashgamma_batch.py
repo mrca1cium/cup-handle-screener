@@ -21,6 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from screener import data as data_mod  # noqa: E402
+from scripts.candidate_priority import (eligible_for_refresh, last_bar_date, priority_symbols, schedule)  # noqa: E402
 from screener.universe import get_broad_market  # noqa: E402
 from screener.market import SECTORS, INDICES  # noqa: E402
 from screener.main import _cheap_filter, _rank  # noqa: E402
@@ -264,59 +265,64 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     fallback_symbols = [str(s).upper() for s in fallback_symbols]
     fallback_set = set(fallback_symbols)
 
+    # Candidate-first scheduling. Use the latest cached SPY bar as a market
+    # reference, not the wall-clock date (weekends/holidays are excluded).
+    previous = {}
+    try:
+        with open(os.path.join(ROOT, "docs", "data", "results.json"), encoding="utf-8") as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        pass
+    important = priority_symbols(previous, symbols)
+    spy_meta = load_cache_meta("SPY")
+    target_date = last_bar_date(spy_meta) if spy_meta else None
+    jobs = []
     missing = []
     stale = []
     skipped_insufficient = 0
-
     for symbol in symbols:
         upper = symbol.upper()
         meta = load_cache_meta(symbol)
-
-        if meta is None:
-            if upper in fallback_set:
-                continue
-            if upper in unavailable or upper in insufficient:
-                continue
-            missing.append(symbol)
-            continue
-
-        if upper in insufficient and upper not in fallback_set:
+        if upper in insufficient:
             skipped_insufficient += 1
             continue
-
-        fetched_at = float(meta.get("fetched_at") or 0)
-        if now - fetched_at >= stale_seconds:
+        if meta is None and upper in unavailable and upper not in fallback_set:
+            continue
+        if meta is None and upper in fallback_set:
+            provider = "twelvedata"
+        elif meta and meta.get("source") == "twelvedata":
+            provider = "twelvedata"
+        else:
+            provider = "stashgamma"
+        is_priority = upper in important
+        if meta is None:
+            missing.append(symbol)
+        else:
+            if not eligible_for_refresh(meta, target_date, now, stale_seconds, is_priority):
+                continue
             stale.append(symbol)
+        last = last_bar_date(meta) if meta else None
+        age = (time.time() - time.mktime(time.strptime(last, "%Y-%m-%d"))) / 86400 if last else 9999
+        jobs.append({"symbol": symbol, "provider": provider,
+                     "tier": 1 if is_priority else (2 if meta is None else 3),
+                     "age_days": max(0, age)})
 
-    # Initial StashGamma gaps are filled by Twelve Data after ordinary
-    # StashGamma-missing symbols are exhausted. Once fallback targets have
-    # caches, normal stale refreshes route to the provider that owns the cache.
+    # Fixed per-run request ceiling. Twelve Data daily credits remain
+    # separately capped; never bypass the provider's own 429 protection.
+    queued = schedule(jobs, max_requests)
+    td_count = 0
+    selected_jobs = []
+    for job in queued:
+        if job["provider"] == "twelvedata":
+            if td_count >= TWELVEDATA_DAILY_BUDGET:
+                continue
+            td_count += 1
+        selected_jobs.append(job)
+    selected = [j["symbol"] for j in selected_jobs]
+    provider_by_symbol = {j["symbol"]: j["provider"] for j in selected_jobs}
+    selected_provider = "candidate-first"
+    fallback_missing = [s for s in missing if s.upper() in fallback_set]
     building_cache = bool(missing)
-    # A fallback symbol that was recently marked insufficient must also
-    # respect the 30-day retry window. Without this filter it would be selected
-    # again on every batch and waste one Twelve Data credit each time.
-    fallback_missing = [
-        s
-        for s in fallback_symbols
-        if load_cache_meta(s) is None and s not in insufficient
-    ]
-
-    # Count fallback symbols that are currently suppressed by the retry window
-    # so the log reflects the real number of temporarily skipped symbols.
-    skipped_insufficient += sum(
-        1
-        for s in fallback_symbols
-        if s in insufficient and load_cache_meta(s) is None
-    )
-    if building_cache:
-        selected = missing[:max_requests]
-        selected_provider = "stashgamma"
-    elif fallback_missing:
-        selected = fallback_missing[:min(max_requests, TWELVEDATA_DAILY_BUDGET)]
-        selected_provider = "twelvedata"
-    else:
-        selected = stale[:max_requests]
-        selected_provider = "mixed"
 
     log.info(
         "Cache build=%s；snapshot=%d；missing=%d；fallback_candidates=%d；fallback_missing=%d；stale=%d；insufficient 暫時跳過=%d；provider=%s；實際處理=%d",
@@ -343,14 +349,7 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     for index, symbol in enumerate(selected, 1):
         meta = load_cache_meta(symbol)
         refresh = meta is not None
-        provider = "stashgamma"
-
-        if selected_provider == "twelvedata" or (
-            selected_provider == "mixed"
-            and meta
-            and meta.get("source") == "twelvedata"
-        ):
-            provider = "twelvedata"
+        provider = provider_by_symbol[symbol]
 
         # Twelve Data Basic allows 8 API credits/minute. Do not assume
         # one request equals one credit: Api-Credits-Request tells us the
@@ -391,14 +390,12 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
             last_twelvedata_request = time.monotonic()
 
         try:
-            if selected_provider == "twelvedata":
+            if provider == "twelvedata":
                 result = (
                     data_mod.refresh_twelvedata(symbol)
                     if refresh
                     else data_mod.fetch_twelvedata(symbol, "2y")
                 )
-            elif selected_provider == "mixed" and meta and meta.get("source") == "twelvedata":
-                result = data_mod.refresh_twelvedata(symbol) if refresh else data_mod.fetch_twelvedata(symbol, "2y")
             else:
                 result = data_mod.fetch_daily(symbol, "2y", refresh=refresh)
 
