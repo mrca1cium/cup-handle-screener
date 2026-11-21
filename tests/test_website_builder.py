@@ -115,6 +115,23 @@ class WebsiteBuildTests(unittest.TestCase):
         self.assertEqual(len(self.charts["FRESH"]["close"]), 20)
         self.assertEqual(self.charts["FRESH"]["pivot"], 125.0)
 
+    def test_new_diagnostics_preserve_legacy_results_and_charts(self):
+        self.assertEqual(self.results["results"][0]["data_date"], self.today)
+        self.assertEqual(self.results["refresh_priority"], ["FRESH", "STALE", "THIN"])
+        self.assertEqual(self.results["data_status"]["STALE"]["status"], "STALE")
+        self.assertEqual(self.results["data_status"]["MISSING"]["status"], "MISSING")
+        self.assertEqual(self.results["watchlist"], [])
+        self.assertEqual(len(self.charts["FRESH"]["dates"]), 20)
+
+    def test_data_failure_diagnostics_do_not_change_scoring(self):
+        self.state["data_diagnostics"] = {"STALE": {"status": "API_FAILED"}}
+        builder.main()
+        with open(os.path.join(self.output_dir, "results.json"), encoding="utf-8") as f:
+            results = json.load(f)
+        self.assertEqual(results["data_status"]["STALE"]["status"], "API_FAILED")
+        self.assertEqual(results["results"], self.results["results"])
+        self.assertEqual(results["watchlist"], self.results["watchlist"])
+
 
 if __name__ == "__main__":
     unittest.main()

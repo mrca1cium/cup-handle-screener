@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import datetime
+import math
+import copy
+from screener.freshness import is_session
 
 MIN_RECHECK_SECONDS = 12 * 3600
 HISTORY_TRADING_DAYS = 20
@@ -26,10 +29,18 @@ def eligible_for_refresh(payload, target_date, now, stale_seconds, priority=Fals
     """
     if payload is None:
         return True
-    fetched = float(payload.get("fetched_at") or 0)
+    try:
+        fetched = float(payload.get("fetched_at") or 0)
+        if not math.isfinite(fetched) or fetched > now:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    last = last_bar_date(payload)
+    if target_date and last and last >= target_date:
+        return False
     if priority and target_date and last_bar_date(payload) and last_bar_date(payload) < target_date:
         return now - fetched >= MIN_RECHECK_SECONDS
-    return now - fetched >= stale_seconds
+    return now - fetched >= (MIN_RECHECK_SECONDS if priority else stale_seconds)
 
 
 def priority_symbols(previous, snapshot):
@@ -46,19 +57,28 @@ def priority_symbols(previous, snapshot):
 def update_candidate_history(history, previous, snapshot, as_of_date, max_sessions=HISTORY_TRADING_DAYS):
     """Maintain a bounded, date-keyed set of former MATCH/WATCH symbols."""
     allowed = {str(s).upper() for s in snapshot}
-    result = {str(k): [s for s in v if s in allowed] for k, v in (history or {}).items()
-              if isinstance(v, list)}
-    if as_of_date:
-        # Normalize timestamps to the market session date; do not create a new
-        # history entry for every intraday rebuild of the same trading day.
-        session = str(as_of_date)[:10]
+    if max_sessions <= 0:
+        return {}
+    try:
+        session = datetime.date.fromisoformat(str(as_of_date)[:10])
+    except (TypeError, ValueError):
+        return {}
+    cutoff = session
+    count = 1 if is_session(session) else 0
+    while count < max_sessions:
+        cutoff -= datetime.timedelta(days=1)
+        if is_session(cutoff):
+            count += 1
+    result = {}
+    for key, values in (history if isinstance(history, dict) else {}).items():
         try:
-            datetime.date.fromisoformat(session)
+            day = datetime.date.fromisoformat(str(key))
         except ValueError:
-            session = None
-        if session:
-            current = priority_symbols(previous, snapshot)
-            result[session] = sorted(set(result.get(session, [])) | current)
+            continue
+        if isinstance(values, list) and cutoff <= day <= session and is_session(day):
+            result[day.isoformat()] = sorted({str(s).upper() for s in values if str(s).upper() in allowed})
+    if is_session(session):
+        result[session.isoformat()] = sorted(set(result.get(session.isoformat(), [])) | priority_symbols(previous, snapshot))
     return dict(sorted(result.items(), reverse=True)[:max_sessions])
 
 
@@ -83,14 +103,17 @@ def schedule(jobs, max_requests, reserve_general_fraction=RESERVE_GENERAL_FRACTI
         if old is None or (job["tier"], -job.get("age_days", 0)) < (old["tier"], -old.get("age_days", 0)):
             unique[symbol] = dict(job, symbol=symbol)
     ordered = sorted(unique.values(), key=lambda x: (x["tier"], -x.get("age_days", 0), x["symbol"]))
-    high = [j for j in ordered if j["tier"] <= 2]
+    primary = [j for j in ordered if j["tier"] < 2]
+    potential = [j for j in ordered if j["tier"] == 2]
     general = [j for j in ordered if j["tier"] > 2]
     reserve = min(len(general), int(max_requests * reserve_general_fraction))
-    first = high[:max_requests - reserve]
-    remaining = max_requests - len(first)
-    chosen_general = general[:remaining]
-    leftover = max_requests - len(first) - len(chosen_general)
-    return first + chosen_general + high[len(first):len(first) + leftover]
+    potential_reserve = min(len(potential), max(1, max_requests // 10)) if potential and max_requests > 1 else 0
+    potential_reserve = min(potential_reserve, max_requests - reserve)
+    chosen = primary[:max_requests - reserve - potential_reserve]
+    chosen += potential[:potential_reserve] + general[:reserve]
+    used = {j["symbol"] for j in chosen}
+    chosen += [j for j in ordered if j["symbol"] not in used][:max_requests - len(chosen)]
+    return chosen
 
 
 def select_provider_jobs(jobs, max_requests, twelvedata_remaining):
@@ -112,34 +135,76 @@ def select_provider_jobs(jobs, max_requests, twelvedata_remaining):
 TWELVEDATA_RESERVE_CREDITS = 8
 
 
-def credit_remaining(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
-    """Fail closed without initialized ledger; use a conservative rolling 24h window.
-
-    A rolling window avoids assuming the provider's daily reset timezone.
-    An operator must seed a verified baseline before any Twelve Data requests.
-    """
-    if reserve <= 0:
-        raise ValueError("reserve must be positive")
-    if not isinstance(ledger, dict):
-        return 0
+def _events(ledger, now):
+    """Reject legacy/ambiguous state rather than assuming unused API capacity."""
+    if (not isinstance(ledger, dict) or ledger.get("version") != 2
+            or ledger.get("exclusive_key") is not True or ledger.get("blocked_reason")
+            or ledger.get("pending", False) is not False):
+        return None
     try:
-        start = float(ledger["window_start"])
-        used = int(ledger["credits"])
-        if start > now or used < 0 or now - start < 0:
-            return 0
-        if now - start >= 86400:
-            # A new window is safe only if no other external consumers exist.
-            return max(0, int(daily_budget) // reserve)
-        return max(0, (int(daily_budget) - used) // reserve)
+        initialized = ledger["initialized_at"]
+        if type(initialized) not in (int, float) or not math.isfinite(initialized) or initialized > now:
+            return None
+        events = ledger["events"]
+        if not isinstance(events, list):
+            return None
+        active, total = [], 0
+        for event in events:
+            at, credits = event["at"], event["credits"]
+            if (type(at) not in (int, float) or not math.isfinite(at) or at > now
+                    or at < initialized or type(credits) is not int or credits <= 0):
+                return None
+            total += credits
+            if now - at < 86400:
+                active.append(dict(event))
+        if type(ledger.get("credits")) is not int or ledger["credits"] != total:
+            return None
+        return active
     except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def credit_remaining(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
+    if type(reserve) is not int or reserve <= 0:
+        raise ValueError("reserve must be a positive integer")
+    events = _events(ledger, now)
+    if events is None:
         return 0
+    return max(0, (daily_budget - sum(e["credits"] for e in events)) // reserve)
 
 
 def reserve_credit(ledger, now, daily_budget, reserve=TWELVEDATA_RESERVE_CREDITS):
-    """Reserve before request; never refund failures or unobserved responses."""
     if credit_remaining(ledger, now, daily_budget, reserve) <= 0:
         return None
-    start = float(ledger["window_start"])
-    if now - start >= 86400:
-        return {"window_start": now, "credits": reserve}
-    return {"window_start": start, "credits": int(ledger["credits"]) + reserve}
+    result = copy.deepcopy(ledger)
+    result["events"] = _events(ledger, now) + [{"at": now, "credits": reserve}]
+    result["pending"] = True
+    result["credits"] = sum(e["credits"] for e in result["events"])
+    return result
+
+
+def initialize_credit_ledger(now, daily_budget, exclusive_key=False):
+    """Offline commissioning: reserve a full budget for a 24h quiet period.
+
+    Never seed an empty ledger against an account whose prior use is unknown.
+    The operator must first isolate this key from every other consumer.
+    """
+    if exclusive_key is not True:
+        raise ValueError("exclusive key confirmation required")
+    return {"version": 2, "initialized_at": now, "exclusive_key": True,
+            "events": [{"at": now, "credits": daily_budget}], "credits": daily_budget}
+
+
+def settle_credit(ledger, now, observed_weight):
+    """Keep reservations, date them at completion, and latch unknown/large costs."""
+    result = copy.deepcopy(ledger)
+    event = result["events"][-1]
+    event["at"] = max(event["at"], now)
+    result["pending"] = False
+    valid = type(observed_weight) is int and 0 < observed_weight <= TWELVEDATA_RESERVE_CREDITS
+    if not valid:
+        result["blocked_reason"] = "unknown_or_excessive_request_weight"
+        if type(observed_weight) is int and observed_weight > event["credits"]:
+            event["credits"] = observed_weight
+    result["credits"] = sum(e["credits"] for e in result["events"])
+    return result

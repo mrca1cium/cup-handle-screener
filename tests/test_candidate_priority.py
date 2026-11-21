@@ -3,7 +3,7 @@ import unittest
 from scripts.candidate_priority import (
     eligible_for_refresh, last_bar_date, priority_symbols, schedule,
     update_candidate_history, historical_priority, select_provider_jobs,
-    credit_remaining, reserve_credit,
+    credit_remaining, reserve_credit, initialize_credit_ledger, settle_credit,
 )
 
 
@@ -52,7 +52,11 @@ class CandidatePriorityTests(unittest.TestCase):
         self.assertEqual(historical_priority(new, ["OLD", "NEW"]), {"OLD", "NEW"})
 
     def test_history_bounded_by_sessions(self):
-        old = {"2026-10-%02d" % i: ["A"] for i in range(1, 28)}
+        import datetime
+        from screener.freshness import is_session
+        end = datetime.date(2026, 11, 20)
+        old = {(end - datetime.timedelta(days=i)).isoformat(): ["A"] for i in range(60)
+               if is_session(end - datetime.timedelta(days=i))}
         result = update_candidate_history(old, {}, ["A"], "2026-11-20")
         self.assertEqual(len(result), 20)
 
@@ -70,16 +74,18 @@ class CandidatePriorityTests(unittest.TestCase):
 
     def test_credit_reservations_accumulate(self):
         now = 1795266000
-        ledger = {"window_start": now, "credits": 0}
+        ledger = {"version": 2, "initialized_at": now, "exclusive_key": True, "events": [], "credits": 0}
         for i in range(3):
             ledger = reserve_credit(ledger, now, 24)
             self.assertEqual(ledger["credits"], (i + 1) * 8)
+            ledger = settle_credit(ledger, now, 1)
         self.assertIsNone(reserve_credit(ledger, now, 24))
         self.assertEqual(credit_remaining(ledger, now, 24), 0)
 
     def test_credit_ledger_rolling_window(self):
         now = 1795266000
-        ledger = reserve_credit({"window_start": now, "credits": 0}, now, 8)
+        ledger = reserve_credit({"version": 2, "initialized_at": now, "exclusive_key": True, "events": [], "credits": 0}, now, 8)
+        ledger = settle_credit(ledger, now, 1)
         self.assertEqual(credit_remaining(ledger, now + 86399, 8), 0)
         self.assertEqual(credit_remaining(ledger, now + 86400, 8), 1)
 
@@ -107,6 +113,68 @@ class CandidatePriorityTests(unittest.TestCase):
             {}, {"results": [{"symbol": "ABC"}]}, ["ABC"],
             "2026-11-20T19:30:00Z")
         self.assertEqual(list(history), ["2026-11-20"])
+
+    def test_rolling_window_does_not_release_late_reservations_early(self):
+        ledger = {"version": 2, "initialized_at": 1000, "exclusive_key": True,
+                  "events": [{"at": 1000, "credits": 8}, {"at": 80000, "credits": 8}], "credits": 16}
+        self.assertEqual(credit_remaining(ledger, 87400, 16), 1)
+        self.assertEqual(credit_remaining(ledger, 166400, 16), 2)
+
+    def test_initialization_requires_exclusive_key_and_full_cooldown(self):
+        with self.assertRaises(ValueError):
+            initialize_credit_ledger(1000, 320)
+        ledger = initialize_credit_ledger(1000, 320, True)
+        self.assertEqual(credit_remaining(ledger, 87399, 320), 0)
+        self.assertEqual(credit_remaining(ledger, 87400, 320), 40)
+
+    def test_bad_credit_cost_quarantine_persists_across_days(self):
+        ledger = initialize_credit_ledger(0, 320, True)
+        ledger = reserve_credit(ledger, 86400, 320)
+        ledger = settle_credit(ledger, 86430, None)
+        self.assertEqual(credit_remaining(ledger, 200000, 320), 0)
+        self.assertIsNone(reserve_credit(ledger, 200000, 320))
+
+    def test_reservation_expires_from_completion_not_start(self):
+        ledger = reserve_credit(initialize_credit_ledger(0, 8, True), 86400, 8)
+        ledger = settle_credit(ledger, 86430, 1)
+        self.assertEqual(credit_remaining(ledger, 172800, 8), 0)
+        self.assertEqual(credit_remaining(ledger, 172830, 8), 1)
+
+    def test_excess_credit_recorded_without_refunds(self):
+        ledger = reserve_credit(initialize_credit_ledger(0, 320, True), 86400, 320)
+        ledger = settle_credit(ledger, 86401, 12)
+        self.assertEqual(ledger["credits"], 12)
+        self.assertEqual(credit_remaining(ledger, 86402, 320), 0)
+
+    def test_corrupt_event_types_fail_closed(self):
+        for credits in (True, "8", -1, 0, 1.2):
+            ledger = {"version": 2, "initialized_at": 0, "exclusive_key": True,
+                      "events": [{"at": 1, "credits": credits}], "credits": credits}
+            with self.subTest(credits=credits):
+                self.assertEqual(credit_remaining(ledger, 1000, 320), 0)
+        for at in (float("nan"), float("inf"), 2000, -1):
+            ledger = {"version": 2, "initialized_at": 0, "exclusive_key": True,
+                      "events": [{"at": at, "credits": 8}], "credits": 8}
+            with self.subTest(at=at):
+                self.assertEqual(credit_remaining(ledger, 1000, 320), 0)
+
+    def test_potential_candidates_receive_reserved_capacity(self):
+        jobs = [{"symbol": "P1-%d" % i, "tier": 1} for i in range(500)]
+        jobs += [{"symbol": "P2-%d" % i, "tier": 2} for i in range(500)]
+        jobs += [{"symbol": "P3-%d" % i, "tier": 3} for i in range(500)]
+        chosen = schedule(jobs, 250)
+        self.assertEqual(len(chosen), 250)
+        self.assertGreaterEqual(sum(j["tier"] == 2 for j in chosen), 25)
+        self.assertGreaterEqual(sum(j["tier"] == 3 for j in chosen), 50)
+
+    def test_current_candidate_not_refetched_even_if_fetched_at_old(self):
+        payload = {"fetched_at": 0, "data": {"dates": ["2026-11-20"]}}
+        self.assertFalse(eligible_for_refresh(payload, "2026-11-20", 1800000000, 604800, True))
+
+    def test_crash_with_unsettled_reservation_remains_blocked_after_24h(self):
+        ledger = reserve_credit(initialize_credit_ledger(0, 320, True), 86400, 320)
+        self.assertTrue(ledger["pending"])
+        self.assertEqual(credit_remaining(ledger, 200000, 320), 0)
 
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])

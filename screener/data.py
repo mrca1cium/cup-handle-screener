@@ -407,6 +407,11 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
     if range_ not in ("2y", "3mo", "1y", "6mo"):
         raise TwelveDataError("不支援的 Twelve Data range: %s" % range_)
 
+    # Never let a failed transport reuse a previous request's credit headers.
+    global TWELVEDATA_LAST_REQUEST_CREDITS, TWELVEDATA_LAST_CREDITS_LEFT
+    TWELVEDATA_LAST_REQUEST_CREDITS = None
+    TWELVEDATA_LAST_CREDITS_LEFT = None
+
     try:
         r = SESSION.get(
             TWELVEDATA_URL,
@@ -428,14 +433,14 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
     # Api-Credits-Request is the weight of this individual request. The
     # used/left headers are cumulative for the current minute. We keep all
     # three so the batch runner can pace from real credit consumption.
-    global TWELVEDATA_LAST_REQUEST_CREDITS, TWELVEDATA_LAST_CREDITS_LEFT
     credit_used = r.headers.get("api-credits-used")
     credit_left = r.headers.get("api-credits-left")
     credit_request = r.headers.get("api-credits-request")
     retry_after = r.headers.get("Retry-After")
 
     try:
-        TWELVEDATA_LAST_REQUEST_CREDITS = max(1, int(credit_request))
+        value = int(credit_request)
+        TWELVEDATA_LAST_REQUEST_CREDITS = value if value > 0 else None
     except (TypeError, ValueError):
         TWELVEDATA_LAST_REQUEST_CREDITS = None
     try:
