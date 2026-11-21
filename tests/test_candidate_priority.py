@@ -1,7 +1,7 @@
 """Offline regression tests for candidate-first scheduling."""
 import unittest
 from scripts.candidate_priority import (
-    eligible_for_refresh, last_bar_date, priority_symbols, schedule,
+    eligible_for_refresh, last_bar_date, priority_symbols, schedule,\n    update_candidate_history, historical_priority, select_provider_jobs,
 )
 
 
@@ -42,6 +42,29 @@ class CandidatePriorityTests(unittest.TestCase):
 
     def test_bad_date_safe(self):
         self.assertIsNone(last_bar_date({"data": {"dates": ["n/a"]}}))
+
+    def test_history_retains_former_candidates(self):
+        old = {"2026-11-19": ["OLD"]}
+        new = update_candidate_history(old, {"results": [{"symbol": "NEW"}]},
+                                       ["OLD", "NEW"], "2026-11-20")
+        self.assertEqual(historical_priority(new, ["OLD", "NEW"]), {"OLD", "NEW"})
+
+    def test_history_bounded_by_sessions(self):
+        old = {"2026-10-%02d" % i: ["A"] for i in range(1, 28)}
+        result = update_candidate_history(old, {}, ["A"], "2026-11-20")
+        self.assertEqual(len(result), 20)
+
+    def test_provider_cap_skips_and_backfills(self):
+        jobs = [{"symbol": "TD1", "provider": "twelvedata"},
+                {"symbol": "TD2", "provider": "twelvedata"},
+                {"symbol": "SG", "provider": "stashgamma"}]
+        result = select_provider_jobs(jobs, 2, 1)
+        self.assertEqual([x["symbol"] for x in result], ["TD1", "SG"])
+
+    def test_provider_zero_credits(self):
+        jobs = [{"symbol": "TD", "provider": "twelvedata"},
+                {"symbol": "SG", "provider": "stashgamma"}]
+        self.assertEqual([x["symbol"] for x in select_provider_jobs(jobs, 2, 0)], ["SG"])
 
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])
