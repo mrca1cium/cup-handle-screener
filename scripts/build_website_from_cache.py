@@ -298,6 +298,8 @@ def main() -> int:
 
     output = {
         "generated_at": generated_at,
+        "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "schema_version": 2,
         "market": market,
         "universe_stats": universe_stats,
         "total_scanned": len(candidates),

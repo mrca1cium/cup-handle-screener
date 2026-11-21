@@ -77,30 +77,6 @@ set +e
 STATUS=$?
 set -e
 
-# Only mark the scheduled slot handled when the batch itself did not hit a
-# provider rate limit. A rate-limited batch remains eligible for a later
-# startup/catch-up invocation rather than being silently lost.
-if [ "$STATUS" -ne 2 ]; then
-  "$PYTHON" - "$STATE_FILE" "$SCHEDULE_SLOT" <<'PY'
-import json
-import os
-import sys
-path, slot = sys.argv[1], sys.argv[2]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        data = {}
-except Exception:
-    data = {}
-data["last_scheduled_slot"] = slot
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-os.replace(tmp, path)
-PY
-fi
-
 # Rebuild the public website data from the local cache after every successful
 # batch. This keeps docs/data/results.json and charts.json on the same cache
 # used by the new screener instead of the retired Yahoo workflow.
@@ -114,6 +90,13 @@ if [ "$STATUS" -ne 2 ]; then
     echo "Website build failed with status $BUILD_STATUS" >&2
     exit "$BUILD_STATUS"
   else
+    # Fail closed before staging, committing or pushing website data.
+    if ! "$PYTHON" "$ROOT/scripts/validate_output.py" \
+        --results "$ROOT/docs/data/results.json" \
+        --charts "$ROOT/docs/data/charts.json"; then
+      echo "Website validation failed; no commit or push attempted" >&2
+      exit 1
+    fi
     /usr/bin/git add docs/data/results.json docs/data/charts.json
     if ! /usr/bin/git diff --cached --quiet; then
       /usr/bin/git config user.name "mrca1cium"
@@ -142,6 +125,32 @@ if [ "$STATUS" -ne 2 ]; then
       trap - EXIT
     fi
   fi
+fi
+
+# Mark the scheduled slot only after the website build, validation and
+# publication steps have succeeded. Failed builds remain retryable.
+# Only mark the scheduled slot handled when the batch itself did not hit a
+# provider rate limit. A rate-limited batch remains eligible for a later
+# startup/catch-up invocation rather than being silently lost.
+if [ "$STATUS" -ne 2 ]; then
+  "$PYTHON" - "$STATE_FILE" "$SCHEDULE_SLOT" <<'PY'
+import json
+import os
+import sys
+path, slot = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+data["last_scheduled_slot"] = slot
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
 fi
 
 exit "$STATUS"
