@@ -10,6 +10,7 @@ are downloaded; stale-cache refreshes do not consume the build quota until the
 snapshot is complete.
 """
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ LOG_DIR = os.path.join(ROOT, ".cache", "logs")
 STATE_PATH = os.path.join(CACHE_DIR, "stashgamma_batch_state.json")
 
 INSUFFICIENT_RETRY_DAYS = 30
-TWELVEDATA_DAILY_BUDGET = 350
+TWELVEDATA_DAILY_BUDGET = 320  # Conservative safety margin below 350 advertised credits
 # Basic allows 8 API credits/minute. The actual weight can vary by request,
 # so the runner now reads Api-Credits-Request from every response.
 TWELVEDATA_MIN_INTERVAL = 8.0
@@ -235,7 +236,7 @@ def refresh_market_cache() -> None:
     log.info("Market radar cache refresh：success=%d failed=%d total=%d", refreshed, failed, len(seen))
 
 
-def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
+def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
     if not os.environ.get("STASHGAMMA_API_KEY"):
         raise SystemExit("找不到 STASHGAMMA_API_KEY")
     if not os.environ.get("TWELVEDATA_API_KEY"):
@@ -550,6 +551,22 @@ def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
         remaining_missing,
     )
     return 0 if not rate_limited else 2
+
+
+def run(max_requests: int = 250, stale_days: int = 7, pause: float = 0.35):
+    """Single-instance guard protects the state ledger and the batch scheduler."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    lock_path = os.path.join(CACHE_DIR, "stashgamma_batch.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.error("Another batch owns the exclusive lock; no API requests made")
+            return 3
+        try:
+            return _run_locked(max_requests, stale_days, pause)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 if __name__ == "__main__":
