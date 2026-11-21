@@ -2,7 +2,7 @@
 import unittest
 from scripts.candidate_priority import (
     eligible_for_refresh, last_bar_date, priority_symbols, schedule,
-    update_candidate_history, historical_priority, select_provider_jobs,
+    update_candidate_history, historical_priority, select_provider_jobs,\n    credit_remaining, reserve_credit,
 )
 
 
@@ -66,6 +66,21 @@ class CandidatePriorityTests(unittest.TestCase):
         jobs = [{"symbol": "TD", "provider": "twelvedata"},
                 {"symbol": "SG", "provider": "stashgamma"}]
         self.assertEqual([x["symbol"] for x in select_provider_jobs(jobs, 2, 0)], ["SG"])
+
+    def test_credit_reservations_accumulate(self):
+        now = 1795266000
+        ledger = None
+        for i in range(3):
+            ledger = reserve_credit(ledger, now, 6)
+            self.assertEqual(ledger["credits"], (i + 1) * 2)
+        self.assertIsNone(reserve_credit(ledger, now, 6))
+        self.assertEqual(credit_remaining(ledger, now, 6), 0)
+
+    def test_credit_ledger_resets_utc_day(self):
+        now = 1795266000
+        ledger = reserve_credit(None, now, 2)
+        self.assertEqual(credit_remaining(ledger, now, 2), 0)
+        self.assertEqual(credit_remaining(ledger, now + 86400, 2), 1)
 
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])
