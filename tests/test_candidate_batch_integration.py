@@ -150,6 +150,11 @@ class BatchIntegrationTests(unittest.TestCase):
             self.assertEqual(batch.run(4), 2)
         self.assertEqual(self.calls, [])
 
+    def test_native_index_codes_never_reach_market_provider(self):
+        with patch.object(batch, "INDICES", {"^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^RUT": "Russell"}):
+            self.assertEqual(batch.run(20), 0)
+        self.assertTrue(all(not symbol.startswith("^") for _, symbol in self.calls))
+
     def test_old_provider_response_is_not_marked_current(self):
         with patch.object(batch.data_mod, "refresh_twelvedata", side_effect=lambda *a: (
                 setattr(batch.data_mod, "TWELVEDATA_LAST_REQUEST_CREDITS", 1) or {"dates": ["2026-11-13"]})):

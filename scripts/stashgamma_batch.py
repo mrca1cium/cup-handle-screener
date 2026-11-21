@@ -305,7 +305,9 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
     missing = []
     stale = []
     skipped_insufficient = 0
-    market_symbols = set(SECTORS) | {"SPY", "QQQ", "IWM"} | set(INDICES)
+    # The provider rejects native ^index symbols (HTTP 400). The website
+    # already uses these tradable proxies for its three index panels.
+    market_symbols = set(SECTORS) | {"SPY", "QQQ", "IWM"}
     for symbol in dict.fromkeys(list(market_symbols) + symbols):
         upper = symbol.upper()
         meta = load_cache_meta(symbol)
