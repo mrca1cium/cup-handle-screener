@@ -106,6 +106,7 @@ class BatchIntegrationTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__):
                 self.state["twelvedata_daily_ledger"] = initialize_credit_ledger(self.now - 90000, 320, True)
                 self.calls.clear()
+                self.state.pop("twelvedata_unavailable_symbols", None)
                 self.failure, self.cost = failure, None
                 self.assertEqual(batch.run(4), 2)
                 self.assertEqual(len(self.calls), 1)
@@ -154,6 +155,18 @@ class BatchIntegrationTests(unittest.TestCase):
         with patch.object(batch, "INDICES", {"^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^RUT": "Russell"}):
             self.assertEqual(batch.run(20), 0)
         self.assertTrue(all(not symbol.startswith("^") for _, symbol in self.calls))
+
+    def test_known_cost_unavailable_does_not_block_other_updates_or_publication(self):
+        self.failure = batch.data_mod.TwelveDataUnavailableError("HTTP 404: data not found")
+        self.assertEqual(batch.run(4), 0)
+        self.assertEqual(self.state["failed"], 0)
+        self.assertEqual(self.state["unavailable"], 2)
+        self.assertEqual(self.state["success"], 2)
+        self.assertEqual(self.state["twelvedata_daily_ledger"]["credits"], 16)
+        self.assertIn("TD1", self.state["twelvedata_unavailable_symbols"])
+        self.calls.clear()
+        self.assertEqual(batch.run(4), 0)
+        self.assertTrue(all(provider == "SG" for provider, _ in self.calls))
 
     def test_old_provider_response_is_not_marked_current(self):
         with patch.object(batch.data_mod, "refresh_twelvedata", side_effect=lambda *a: (

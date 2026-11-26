@@ -454,6 +454,8 @@ def _twelvedata(symbol: str, range_: str = "2y", timeout: int = 30) -> Optional[
             "api-credits-used=%s; api-credits-left=%s"
             % (symbol, retry_after, credit_used, credit_left)
         )
+    if r.status_code == 404:
+        raise TwelveDataUnavailableError("%s Twelve Data HTTP 404: data not found" % symbol)
     if r.status_code in (401, 403):
         raise TwelveDataError(
             "%s Twelve Data API key 無效或未獲授權（HTTP %d）"

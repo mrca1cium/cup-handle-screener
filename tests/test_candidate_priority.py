@@ -176,6 +176,20 @@ class CandidatePriorityTests(unittest.TestCase):
         self.assertTrue(ledger["pending"])
         self.assertEqual(credit_remaining(ledger, 200000, 320), 0)
 
+    def test_newly_closed_session_overrides_preclose_fetch_throttle(self):
+        import datetime
+        def epoch(value): return datetime.datetime.fromisoformat(value).timestamp()
+        payload = {"fetched_at": epoch("2026-11-25T13:00:30+00:00"),
+                   "data": {"dates": ["2026-11-23"]}}
+        self.assertTrue(eligible_for_refresh(payload, "2026-11-25", epoch("2026-11-26T01:00:00+00:00"), 604800, True))
+
+    def test_unchanged_response_after_close_still_has_retry_throttle(self):
+        import datetime
+        def epoch(value): return datetime.datetime.fromisoformat(value).timestamp()
+        payload = {"fetched_at": epoch("2026-11-25T23:30:00+00:00"),
+                   "data": {"dates": ["2026-11-23"]}}
+        self.assertFalse(eligible_for_refresh(payload, "2026-11-25", epoch("2026-11-26T01:00:00+00:00"), 604800, True))
+
     def test_zero_budget(self):
         self.assertEqual(schedule([{"symbol": "A", "tier": 1}], 0), [])
 
