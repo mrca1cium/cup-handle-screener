@@ -266,6 +266,7 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
     now = time.time()
     stale_seconds = stale_days * 86400
     insufficient = insufficient_symbols(state, now)
+    td_unavailable = insufficient_symbols({"insufficient_symbols": state.get("twelvedata_unavailable_symbols", {})}, now)
 
     fallback_symbols = state.get("twelvedata_fallback_symbols")
     if not isinstance(fallback_symbols, list):
@@ -322,6 +323,8 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
             provider = "twelvedata"
         else:
             provider = "stashgamma"
+        if provider == "twelvedata" and upper in td_unavailable:
+            continue
         is_priority = upper in important or upper in market_symbols
         if meta is None:
             missing.append(symbol)
@@ -487,7 +490,12 @@ def _run_locked(max_requests: int = 250, stale_days: int = 7, pause: float = 0.3
                     if last_twelvedata_credits_left is not None
                     else "?",
                 )
-            failed += 1
+            # An unsupported instrument is recoverable; do not discard other
+            # successful cache refreshes or prevent their website publication.
+            unavailable_count += 1
+            cooldown = load_state().get("twelvedata_unavailable_symbols") or {}
+            cooldown[symbol.upper()] = {"checked_at": time.time(), "retry_after_days": INSUFFICIENT_RETRY_DAYS}
+            save_state(twelvedata_unavailable_symbols=cooldown)
             log.warning("[%d/%d] %s Twelve Data unavailable：%s", index, len(selected), symbol, exc)
         except data_mod.TwelveDataRateLimitError as exc:
             diagnostics[symbol] = {"status": "RATE_LIMITED", "provider": provider}

@@ -36,6 +36,14 @@ class HeaderTests(unittest.TestCase):
                     data._twelvedata("ABC")
                 self.assertEqual(data.get_twelvedata_credit_state()[0], 8)
 
+    def test_http_404_is_instrument_unavailability_with_preserved_credit_cost(self):
+        response = Mock(status_code=404, headers={"api-credits-request": "1"}, text="data not found")
+        with patch.dict(os.environ, TWELVEDATA_API_KEY="offline"), \
+             patch.object(data.SESSION, "get", return_value=response):
+            with self.assertRaises(data.TwelveDataUnavailableError):
+                data._twelvedata("ABC")
+        self.assertEqual(data.get_twelvedata_credit_state()[0], 1)
+
     def test_malformed_json_does_not_lose_cost_information(self):
         response = Mock(status_code=200, headers={"api-credits-request": "1"})
         response.json.side_effect = ValueError("invalid JSON")

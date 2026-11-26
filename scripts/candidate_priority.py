@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime
 import math
 import copy
-from screener.freshness import is_session
+from screener.freshness import is_session, NY, close_hour, PROVIDER_GRACE
 
 MIN_RECHECK_SECONDS = 12 * 3600
 HISTORY_TRADING_DAYS = 20
@@ -38,7 +38,13 @@ def eligible_for_refresh(payload, target_date, now, stale_seconds, priority=Fals
     last = last_bar_date(payload)
     if target_date and last and last >= target_date:
         return False
-    if priority and target_date and last_bar_date(payload) and last_bar_date(payload) < target_date:
+    if priority and target_date and last and last < target_date:
+        day = datetime.date.fromisoformat(target_date)
+        ready = datetime.datetime.combine(day, datetime.time(close_hour(day)), NY) + PROVIDER_GRACE
+        # A fetch before this session closed cannot satisfy the new session.
+        # Do not let a 12h scheduler interval miss by a few seconds forever.
+        if now >= ready.timestamp() and fetched < ready.timestamp():
+            return True
         return now - fetched >= MIN_RECHECK_SECONDS
     return now - fetched >= (MIN_RECHECK_SECONDS if priority else stale_seconds)
 
